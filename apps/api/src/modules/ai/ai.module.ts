@@ -1,38 +1,50 @@
 import { Module } from '@nestjs/common';
-import { AiProvider } from './ai-provider.abstract';
-import { GeminiProvider } from './services/gemini.provider';
-import { OllamaProvider } from './services/ollama.provider';
-import { VllmProvider } from './services/vllm.provider';
+import { AiProvider } from './interfaces/ai-provider.interface';
+import { createAiProvider } from './factories/ai-provider.factory';
 import { QdrantService } from './services/qdrant.service';
 import { QdrantInitService } from './services/qdrant-init.service';
 import { IntentExtractorService } from './services/intent-extractor.service';
+import { WhisperService } from './services/whisper.service';
 import { AiController } from './ai.controller';
 import { AuthModule } from '../auth/auth.module';
-
-function createAiProvider(): AiProvider {
-  const provider = process.env['AI_PROVIDER'] ?? 'gemini';
-  switch (provider) {
-    case 'ollama':
-      return new OllamaProvider();
-    case 'vllm':
-      return new VllmProvider();
-    default:
-      return new GeminiProvider();
-  }
-}
+import Redis from 'ioredis';
 
 @Module({
   imports: [AuthModule],
   controllers: [AiController],
   providers: [
+    // ── AI provider (Strategy Pattern) ──────────────────────────────────────
     {
-      provide: AiProvider,
+      provide:    AiProvider,
       useFactory: createAiProvider,
     },
+
+    // ── Redis client for rate limiting ───────────────────────────────────────
+    // Optional — if Redis is unreachable the rate limiter degrades gracefully.
+    {
+      provide:    'REDIS_CLIENT',
+      useFactory: (): Redis | null => {
+        const url = process.env['REDIS_URL'];
+        if (!url) return null;
+        const client = new Redis(url, {
+          lazyConnect: true,
+          maxRetriesPerRequest: 1,
+          enableOfflineQueue: false,
+        });
+        client.on('error', (err: Error) => {
+          // Suppress connection errors — rate limiter degrades gracefully
+          void err;
+        });
+        return client;
+      },
+    },
+
+    // ── Core AI services ─────────────────────────────────────────────────────
     QdrantService,
     QdrantInitService,
+    WhisperService,
     IntentExtractorService,
   ],
-  exports: [AiProvider, IntentExtractorService, QdrantService],
+  exports: [AiProvider, IntentExtractorService, QdrantService, WhisperService],
 })
 export class AiModule {}
