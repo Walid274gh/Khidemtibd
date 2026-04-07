@@ -1,6 +1,8 @@
 // lib/models/user_model.dart
+//
+// STEP 1 MIGRATION: Firestore Timestamp → ISO-8601 DateTime string
+// fromMap() now parses JSON from the NestJS REST API (no cloud_firestore dep).
 
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:equatable/equatable.dart';
 
 const _kUndefined = Object();
@@ -18,10 +20,6 @@ class UserModel extends Equatable {
   final String? cellId;
   final int? wilayaCode;
   final String? geoHash;
-
-  // FIX (Backend Audit): fcmToken was updated in Firestore via
-  // updateFcmToken() but never mapped back from the document. Any service
-  // that read the UserModel to get the FCM token would silently receive null.
   final String? fcmToken;
 
   const UserModel({
@@ -47,14 +45,19 @@ class UserModel extends Equatable {
       phoneNumber: map['phoneNumber'] as String? ?? '',
       latitude: (map['latitude'] as num?)?.toDouble(),
       longitude: (map['longitude'] as num?)?.toDouble(),
-      lastUpdated:
-          (map['lastUpdated'] as Timestamp?)?.toDate() ?? DateTime.now(),
+      lastUpdated: _parseDate(map['lastUpdated']),
       profileImageUrl: map['profileImageUrl'] as String?,
       cellId: map['cellId'] as String?,
       wilayaCode: map['wilayaCode'] as int?,
       geoHash: map['geoHash'] as String?,
       fcmToken: map['fcmToken'] as String?,
     );
+  }
+
+  // Also accepts NestJS response where id is under '_id'
+  factory UserModel.fromJson(Map<String, dynamic> json) {
+    final id = (json['_id'] ?? json['id']) as String? ?? '';
+    return UserModel.fromMap(json, id);
   }
 
   Map<String, dynamic> toMap() {
@@ -64,7 +67,7 @@ class UserModel extends Equatable {
       'phoneNumber': phoneNumber,
       'latitude': latitude,
       'longitude': longitude,
-      'lastUpdated': Timestamp.fromDate(lastUpdated),
+      'lastUpdated': lastUpdated.toIso8601String(),
       'profileImageUrl': profileImageUrl,
       'cellId': cellId,
       'wilayaCode': wilayaCode,
@@ -73,8 +76,6 @@ class UserModel extends Equatable {
     };
   }
 
-  // Sentinel pattern: pass null explicitly to clear a nullable field,
-  // omit the param entirely to keep the existing value.
   UserModel copyWith({
     String? id,
     String? name,
@@ -94,44 +95,34 @@ class UserModel extends Equatable {
       name:        name        ?? this.name,
       email:       email       ?? this.email,
       phoneNumber: phoneNumber ?? this.phoneNumber,
-      latitude: identical(latitude, _kUndefined)
-          ? this.latitude
-          : latitude as double?,
-      longitude: identical(longitude, _kUndefined)
-          ? this.longitude
-          : longitude as double?,
+      latitude: identical(latitude, _kUndefined) ? this.latitude : latitude as double?,
+      longitude: identical(longitude, _kUndefined) ? this.longitude : longitude as double?,
       lastUpdated: lastUpdated ?? this.lastUpdated,
       profileImageUrl: identical(profileImageUrl, _kUndefined)
           ? this.profileImageUrl
           : profileImageUrl as String?,
-      cellId: identical(cellId, _kUndefined)
-          ? this.cellId
-          : cellId as String?,
-      wilayaCode: identical(wilayaCode, _kUndefined)
-          ? this.wilayaCode
-          : wilayaCode as int?,
-      geoHash: identical(geoHash, _kUndefined)
-          ? this.geoHash
-          : geoHash as String?,
-      fcmToken: identical(fcmToken, _kUndefined)
-          ? this.fcmToken
-          : fcmToken as String?,
+      cellId: identical(cellId, _kUndefined) ? this.cellId : cellId as String?,
+      wilayaCode: identical(wilayaCode, _kUndefined) ? this.wilayaCode : wilayaCode as int?,
+      geoHash: identical(geoHash, _kUndefined) ? this.geoHash : geoHash as String?,
+      fcmToken: identical(fcmToken, _kUndefined) ? this.fcmToken : fcmToken as String?,
     );
   }
 
   @override
   List<Object?> get props => [
-        id,
-        name,
-        email,
-        phoneNumber,
-        latitude,
-        longitude,
-        lastUpdated,
-        profileImageUrl,
-        cellId,
-        wilayaCode,
-        geoHash,
-        fcmToken,
+        id, name, email, phoneNumber, latitude, longitude,
+        lastUpdated, profileImageUrl, cellId, wilayaCode, geoHash, fcmToken,
       ];
+}
+
+DateTime _parseDate(dynamic value) {
+  if (value == null) return DateTime.now();
+  if (value is DateTime) return value;
+  if (value is String) return DateTime.tryParse(value) ?? DateTime.now();
+  // Legacy Firestore Timestamp shape {_seconds, _nanoseconds} — safe fallback
+  if (value is Map) {
+    final seconds = value['_seconds'] as int?;
+    if (seconds != null) return DateTime.fromMillisecondsSinceEpoch(seconds * 1000);
+  }
+  return DateTime.now();
 }

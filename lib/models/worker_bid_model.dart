@@ -1,12 +1,10 @@
 // lib/models/worker_bid_model.dart
+//
+// STEP 1 MIGRATION: Firestore Timestamp → ISO-8601 DateTime string
 
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:equatable/equatable.dart';
-
 import 'message_enums.dart';
 
-// Sentinel used by copyWith to distinguish "caller explicitly passed null"
-// from "caller did not pass this argument".
 const _kUndefined = Object();
 
 class WorkerBidModel extends Equatable {
@@ -50,27 +48,26 @@ class WorkerBidModel extends Equatable {
       serviceRequestId: map['serviceRequestId'] as String? ?? '',
       workerId: map['workerId'] as String? ?? '',
       workerName: map['workerName'] as String? ?? '',
-      workerAverageRating:
-          (map['workerAverageRating'] as num?)?.toDouble() ?? 0.0,
+      workerAverageRating: (map['workerAverageRating'] as num?)?.toDouble() ?? 0.0,
       workerJobsCompleted: map['workerJobsCompleted'] as int? ?? 0,
       workerProfileImageUrl: map['workerProfileImageUrl'] as String?,
       proposedPrice: (map['proposedPrice'] as num?)?.toDouble() ?? 0.0,
       estimatedMinutes: map['estimatedMinutes'] as int? ?? 60,
-      availableFrom:
-          (map['availableFrom'] as Timestamp?)?.toDate() ?? DateTime.now(),
+      availableFrom: _parseDate(map['availableFrom']),
       message: map['message'] as String?,
-      // FIX (QA P1): supports both legacy format ('BidStatus.pending' from
-      // toString()) and new short format ('pending' from .name). The short
-      // format is written by toMap() going forward.
       status: BidStatus.values.firstWhere(
         (e) => e.name == map['status'] || e.toString() == map['status'],
         orElse: () => BidStatus.pending,
       ),
-      createdAt:
-          (map['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
-      expiresAt: (map['expiresAt'] as Timestamp?)?.toDate(),
-      acceptedAt: (map['acceptedAt'] as Timestamp?)?.toDate(),
+      createdAt: _parseDate(map['createdAt']),
+      expiresAt: _parseDateOrNull(map['expiresAt']),
+      acceptedAt: _parseDateOrNull(map['acceptedAt']),
     );
+  }
+
+  factory WorkerBidModel.fromJson(Map<String, dynamic> json) {
+    final id = (json['_id'] ?? json['id']) as String? ?? '';
+    return WorkerBidModel.fromMap(json, id);
   }
 
   Map<String, dynamic> toMap() {
@@ -84,20 +81,15 @@ class WorkerBidModel extends Equatable {
       'workerProfileImageUrl': workerProfileImageUrl,
       'proposedPrice': proposedPrice,
       'estimatedMinutes': estimatedMinutes,
-      'availableFrom': Timestamp.fromDate(availableFrom),
+      'availableFrom': availableFrom.toIso8601String(),
       'message': message,
-      // FIX (QA P1): use .name instead of .toString() — stores 'pending'
-      // rather than 'BidStatus.pending'. Robust to class renames and refactors.
       'status': status.name,
-      'createdAt': Timestamp.fromDate(createdAt),
-      'expiresAt': expiresAt != null ? Timestamp.fromDate(expiresAt!) : null,
-      'acceptedAt':
-          acceptedAt != null ? Timestamp.fromDate(acceptedAt!) : null,
+      'createdAt': createdAt.toIso8601String(),
+      'expiresAt': expiresAt?.toIso8601String(),
+      'acceptedAt': acceptedAt?.toIso8601String(),
     };
   }
 
-  // FIX (Engineer): nullable fields used `??` which made it impossible to
-  // explicitly clear them via copyWith. Sentinel pattern applied.
   WorkerBidModel copyWith({
     String? id,
     String? serviceRequestId,
@@ -128,21 +120,14 @@ class WorkerBidModel extends Equatable {
       proposedPrice: proposedPrice ?? this.proposedPrice,
       estimatedMinutes: estimatedMinutes ?? this.estimatedMinutes,
       availableFrom: availableFrom ?? this.availableFrom,
-      message: identical(message, _kUndefined)
-          ? this.message
-          : message as String?,
+      message: identical(message, _kUndefined) ? this.message : message as String?,
       status: status ?? this.status,
       createdAt: createdAt ?? this.createdAt,
-      expiresAt: identical(expiresAt, _kUndefined)
-          ? this.expiresAt
-          : expiresAt as DateTime?,
-      acceptedAt: identical(acceptedAt, _kUndefined)
-          ? this.acceptedAt
-          : acceptedAt as DateTime?,
+      expiresAt: identical(expiresAt, _kUndefined) ? this.expiresAt : expiresAt as DateTime?,
+      acceptedAt: identical(acceptedAt, _kUndefined) ? this.acceptedAt : acceptedAt as DateTime?,
     );
   }
 
-  // Human-readable duration label
   String get estimatedDurationLabel {
     if (estimatedMinutes < 60) return '${estimatedMinutes}min';
     final hours = estimatedMinutes ~/ 60;
@@ -151,11 +136,8 @@ class WorkerBidModel extends Equatable {
     return '${hours}h${mins}min';
   }
 
-  // Worker initials for avatar fallback
   String get workerInitials {
     final parts = workerName.trim().split(' ').where((w) => w.isNotEmpty).toList();
-    // FIX (QA P1): previous impl used parts[0][0] without guarding against
-    // an empty string segment — RangeError on edge-case names like '  '.
     if (parts.isEmpty) return '?';
     final first = parts[0];
     if (first.isEmpty) return '?';
@@ -167,20 +149,31 @@ class WorkerBidModel extends Equatable {
 
   @override
   List<Object?> get props => [
-        id,
-        serviceRequestId,
-        workerId,
-        workerName,
-        workerAverageRating,
-        workerJobsCompleted,
-        workerProfileImageUrl,
-        proposedPrice,
-        estimatedMinutes,
-        availableFrom,
-        message,
-        status,
-        createdAt,
-        expiresAt,
-        acceptedAt,
+        id, serviceRequestId, workerId, workerName, workerAverageRating,
+        workerJobsCompleted, workerProfileImageUrl, proposedPrice,
+        estimatedMinutes, availableFrom, message, status,
+        createdAt, expiresAt, acceptedAt,
       ];
+}
+
+DateTime _parseDate(dynamic value) {
+  if (value == null) return DateTime.now();
+  if (value is DateTime) return value;
+  if (value is String) return DateTime.tryParse(value) ?? DateTime.now();
+  if (value is Map) {
+    final seconds = value['_seconds'] as int?;
+    if (seconds != null) return DateTime.fromMillisecondsSinceEpoch(seconds * 1000);
+  }
+  return DateTime.now();
+}
+
+DateTime? _parseDateOrNull(dynamic value) {
+  if (value == null) return null;
+  if (value is DateTime) return value;
+  if (value is String) return DateTime.tryParse(value);
+  if (value is Map) {
+    final seconds = value['_seconds'] as int?;
+    if (seconds != null) return DateTime.fromMillisecondsSinceEpoch(seconds * 1000);
+  }
+  return null;
 }

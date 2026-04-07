@@ -1,6 +1,7 @@
 // lib/models/media_attachment.dart
+//
+// STEP 1 MIGRATION: Firestore Timestamp → ISO-8601 DateTime string
 
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:equatable/equatable.dart';
 import 'message_enums.dart';
 
@@ -10,7 +11,7 @@ class MediaAttachment extends Equatable {
   final String localPath;
   final MediaType type;
   final DateTime uploadedAt;
-  final int? fileSize; // en bytes
+  final int? fileSize;
 
   const MediaAttachment({
     required this.id,
@@ -26,16 +27,11 @@ class MediaAttachment extends Equatable {
       id: map['id'] as String? ?? '',
       url: map['url'] as String? ?? '',
       localPath: map['localPath'] as String? ?? '',
-      // FIX (QA P1): supports both legacy format ('MediaType.image' from
-      // toString()) and new short format ('image' from .name). The short format
-      // is written by toMap() going forward. All new documents use .name;
-      // existing documents are transparently migrated on first read.
       type: MediaType.values.firstWhere(
         (e) => e.name == map['type'] || e.toString() == map['type'],
         orElse: () => MediaType.image,
       ),
-      uploadedAt:
-          (map['uploadedAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
+      uploadedAt: _parseDate(map['uploadedAt']),
       fileSize: map['fileSize'] as int?,
     );
   }
@@ -45,39 +41,34 @@ class MediaAttachment extends Equatable {
       'id': id,
       'url': url,
       'localPath': localPath,
-      // FIX (QA P1): use .name instead of .toString() so Firestore stores
-      // 'image' rather than 'MediaType.image'. Robust to class renames.
       'type': type.name,
-      'uploadedAt': Timestamp.fromDate(uploadedAt),
+      'uploadedAt': uploadedAt.toIso8601String(),
       'fileSize': fileSize,
     };
   }
 
   MediaAttachment copyWith({
-    String? id,
-    String? url,
-    String? localPath,
-    MediaType? type,
-    DateTime? uploadedAt,
-    int? fileSize,
+    String? id, String? url, String? localPath,
+    MediaType? type, DateTime? uploadedAt, int? fileSize,
   }) {
     return MediaAttachment(
-      id: id ?? this.id,
-      url: url ?? this.url,
-      localPath: localPath ?? this.localPath,
-      type: type ?? this.type,
-      uploadedAt: uploadedAt ?? this.uploadedAt,
+      id: id ?? this.id, url: url ?? this.url, localPath: localPath ?? this.localPath,
+      type: type ?? this.type, uploadedAt: uploadedAt ?? this.uploadedAt,
       fileSize: fileSize ?? this.fileSize,
     );
   }
 
   @override
-  List<Object?> get props => [
-        id,
-        url,
-        localPath,
-        type,
-        uploadedAt,
-        fileSize,
-      ];
+  List<Object?> get props => [id, url, localPath, type, uploadedAt, fileSize];
+}
+
+DateTime _parseDate(dynamic value) {
+  if (value == null) return DateTime.now();
+  if (value is DateTime) return value;
+  if (value is String) return DateTime.tryParse(value) ?? DateTime.now();
+  if (value is Map) {
+    final seconds = value['_seconds'] as int?;
+    if (seconds != null) return DateTime.fromMillisecondsSinceEpoch(seconds * 1000);
+  }
+  return DateTime.now();
 }
