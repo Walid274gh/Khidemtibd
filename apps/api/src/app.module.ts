@@ -13,6 +13,7 @@ import { ServiceRequestsModule } from './modules/service-requests/service-reques
 import { BidsModule } from './modules/bids/bids.module';
 import { LocationModule } from './modules/location/location.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
+import { GatewayModule } from './modules/gateway/gateway.module';
 import { HealthController } from './health.controller';
 
 @Module({
@@ -56,6 +57,9 @@ import { HealthController } from './health.controller';
     BidsModule,
     LocationModule,
     NotificationsModule,
+
+    // ── Real-time WebSocket gateways ───────────────────────────────────────
+    GatewayModule,
   ],
   controllers: [HealthController],
 })
