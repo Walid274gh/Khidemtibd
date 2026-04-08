@@ -1,5 +1,4 @@
-SHELL := cmd.exe
-.SHELLFLAGS := /C
+
 
 # ==========================================
 # MAKEFILE - KHIDMETI BACKEND
