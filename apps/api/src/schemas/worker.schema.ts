@@ -1,7 +1,7 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document } from 'mongoose';
 
-export type WorkerDocument = Worker & Document;
+export type WorkerDocument = Worker & Document & { ratingSum?: number };
 
 @Schema({ collection: 'workers', timestamps: false, versionKey: false })
 export class Worker {
@@ -53,6 +53,7 @@ export class Worker {
   @Prop({ default: 0, min: 0 })
   ratingCount: number;
 
+  // ratingSum enables Bayesian average computation without full history
   @Prop({ default: 0, min: 0 })
   ratingSum: number;
 
