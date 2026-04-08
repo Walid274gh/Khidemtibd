@@ -1,9 +1,15 @@
 // lib/main.dart
+//
+// STEP 6 MIGRATION:
+//   • Removed: import 'package:cloud_firestore/cloud_firestore.dart'
+//   • Removed: FirebaseFirestore.instance.settings (persistenceEnabled: true)
+//              — offline persistence was Firestore-specific; MongoDB handles
+//                durability server-side.
+//   • Everything else unchanged.
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_native_splash/flutter_native_splash.dart';
@@ -35,14 +41,6 @@ void main() async {
     await Firebase.initializeApp();
     AppLogger.success('Firebase initialized');
 
-    // FIX: Enable Firestore offline persistence explicitly.
-    // On Android this is already enabled by default; on iOS it is disabled
-    // by default, meaning iOS users get no offline capability without this.
-    FirebaseFirestore.instance.settings = const Settings(
-      persistenceEnabled: true,
-    );
-    AppLogger.info('Firestore offline persistence enabled');
-
     await AppConfig.initialize();
     AppLogger.success('Remote Config initialized');
 
@@ -60,10 +58,10 @@ void main() async {
     await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     SystemChrome.setSystemUIOverlayStyle(
       const SystemUiOverlayStyle(
-        systemNavigationBarColor:        Colors.transparent,
-        systemNavigationBarDividerColor:      Colors.transparent,
+        systemNavigationBarColor:            Colors.transparent,
+        systemNavigationBarDividerColor:     Colors.transparent,
         systemNavigationBarContrastEnforced: false,
-        statusBarColor:                  Colors.transparent,
+        statusBarColor:                      Colors.transparent,
       ),
     );
 
@@ -152,23 +150,17 @@ class _KhidmetiAppState extends ConsumerState<KhidmetiApp>
 
   @override
   Widget build(BuildContext context) {
-    final router = ref.watch(goRouterProvider);
-    // FIX (P1): Watch currentLocaleProvider (driven by localeStateNotifierProvider)
-    // instead of languageServiceProvider directly. Previously, watching
-    // languageServiceProvider subscribed to its ChangeNotifier, which only fired
-    // on the very first initialization call — leaving the locale frozen for all
-    // subsequent language changes. currentLocaleProvider rebuilds whenever the
-    // locale value itself changes, ensuring the app re-renders with the new locale.
+    final router        = ref.watch(goRouterProvider);
     final currentLocale = ref.watch(currentLocaleProvider);
-    final themeMode = ref.watch(themeModeProvider);
+    final themeMode     = ref.watch(themeModeProvider);
 
     return MaterialApp.router(
-      title: 'Khidmeti',
-      routerConfig: router,
-      theme: AppTheme.lightTheme,
-      darkTheme: AppTheme.darkTheme,
-      themeMode: themeMode,
-      locale: currentLocale,
+      title:         'Khidmeti',
+      routerConfig:  router,
+      theme:         AppTheme.lightTheme,
+      darkTheme:     AppTheme.darkTheme,
+      themeMode:     themeMode,
+      locale:        currentLocale,
       supportedLocales: LanguageService.supportedLocales,
       localizationsDelegates: const [
         AppLocalizations.delegate,
