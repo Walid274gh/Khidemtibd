@@ -1,10 +1,17 @@
 // lib/services/notification_push_service.dart
+//
+// STEP 6 MIGRATION:
+//   • Removed: import 'firestore_service.dart'
+//   • Added:   import 'api_service.dart'
+//   • Changed: final FirestoreService firestoreService → final ApiService firestoreService
+//              All method calls (updateFcmToken, getWorker, updateWorkerFcmToken)
+//              exist on ApiService with identical signatures.
 
 import 'dart:async';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'auth_service.dart';
-import 'firestore_service.dart';
+import 'api_service.dart';
 
 class NotificationPushServiceException implements Exception {
   final String message;
@@ -34,7 +41,9 @@ class NotificationPushService {
   static const String topicPattern = r'^[a-zA-Z0-9-_.~%]+$';
 
   final AuthService authService;
-  final FirestoreService firestoreService;
+  // STEP 6: type changed from FirestoreService → ApiService
+  // Field name kept for constructor callsite compat.
+  final ApiService firestoreService;
   final FirebaseMessaging _firebaseMessaging;
 
   StreamSubscription<String>? _tokenRefreshSubscription;
@@ -121,17 +130,9 @@ class NotificationPushService {
           AuthorizationStatus.notDetermined) {
         _logWarning(
           'Notification permissions not yet determined (first install) — '
-          'proceeding without blocking. Token will be saved once permissions '
-          'are granted.',
+          'proceeding without blocking.',
         );
         return;
-      }
-
-      if (settings.authorizationStatus != AuthorizationStatus.authorized &&
-          settings.authorizationStatus !=
-              AuthorizationStatus.provisional) {
-        _logWarning(
-            'Notification permissions not fully authorized: ${settings.authorizationStatus}');
       }
     } catch (e) {
       _logError('_requestPermissions', e);
@@ -185,10 +186,7 @@ class NotificationPushService {
     }
   }
 
-  /// FIX (Critical): writes FCM token to both the `users` collection and,
-  /// if the authenticated user is a worker, to the `workers` collection.
-  /// Workers will now receive push notifications for bids, job starts, and
-  /// completions.
+  /// Saves FCM token to users + workers collections via REST API.
   Future<void> _saveFcmToken(String token) async {
     if (token.trim().isEmpty) {
       _logWarning('Attempted to save empty FCM token');
@@ -206,7 +204,7 @@ class NotificationPushService {
       await firestoreService.updateFcmToken(user.uid, token);
       _logInfo('FCM token saved for user: ${user.uid}');
 
-      // FIX: also update the workers collection if the user is a worker.
+      // Also update the workers collection if the user is a worker.
       final worker = await firestoreService.getWorker(user.uid);
       if (worker != null) {
         await firestoreService.updateWorkerFcmToken(user.uid, token);
@@ -266,11 +264,9 @@ class NotificationPushService {
     return _retryOperation(() async {
       try {
         _logInfo('Subscribing to topic: $topic');
-
         await _firebaseMessaging
             .subscribeToTopic(topic)
             .timeout(tokenOperationTimeout);
-
         _logInfo('Successfully subscribed to topic: $topic');
       } on TimeoutException {
         throw NotificationPushServiceException(
@@ -295,11 +291,9 @@ class NotificationPushService {
     return _retryOperation(() async {
       try {
         _logInfo('Unsubscribing from topic: $topic');
-
         await _firebaseMessaging
             .unsubscribeFromTopic(topic)
             .timeout(tokenOperationTimeout);
-
         _logInfo('Successfully unsubscribed from topic: $topic');
       } on TimeoutException {
         throw NotificationPushServiceException(
@@ -323,11 +317,9 @@ class NotificationPushService {
     return _retryOperation(() async {
       try {
         _logInfo('Deleting FCM token');
-
         await _firebaseMessaging
             .deleteToken()
             .timeout(tokenOperationTimeout);
-
         _clearCachedToken();
         _logInfo('FCM token deleted successfully');
       } on TimeoutException {
@@ -359,9 +351,7 @@ class NotificationPushService {
         badge: badge,
         sound: sound,
       );
-
-      _logInfo(
-          'Foreground notification options set: alert=$alert, badge=$badge, sound=$sound');
+      _logInfo('Foreground notification options set');
     } catch (e) {
       _logError('setForegroundNotificationPresentationOptions', e);
       throw NotificationPushServiceException(
@@ -403,22 +393,18 @@ class NotificationPushService {
         code: 'INVALID_TOPIC_NAME',
       );
     }
-
-    if (topic.length < minTopicNameLength ||
-        topic.length > maxTopicNameLength) {
+    if (topic.length < minTopicNameLength || topic.length > maxTopicNameLength) {
       throw NotificationPushServiceException(
         'Topic name length must be between $minTopicNameLength and $maxTopicNameLength characters',
         code: 'INVALID_TOPIC_LENGTH',
       );
     }
-
     if (!RegExp(topicPattern).hasMatch(topic)) {
       throw NotificationPushServiceException(
-        'Topic name contains invalid characters. Use only: a-z A-Z 0-9 - _ . ~ %',
+        'Topic name contains invalid characters.',
         code: 'INVALID_TOPIC_CHARACTERS',
       );
     }
-
     if (topic.startsWith('/topics/')) {
       throw NotificationPushServiceException(
         'Topic name should not include the /topics/ prefix',
@@ -452,14 +438,12 @@ class NotificationPushService {
         return await operation();
       } catch (e) {
         attempts++;
-
         if (e is NotificationPushServiceException &&
             (e.code?.contains('TIMEOUT') ?? false)) {
           if (attempts >= maxRetries) rethrow;
         } else if (attempts >= maxRetries) {
           rethrow;
         }
-
         final delay = baseRetryDelay * attempts;
         _logWarning('Retry $attempts/$maxRetries after ${delay.inSeconds}s');
         await Future.delayed(delay);
@@ -486,8 +470,7 @@ class NotificationPushService {
   }
 
   void _logWarning(String message) {
-    if (kDebugMode)
-      debugPrint('[NotificationPushService] WARNING: $message');
+    if (kDebugMode) debugPrint('[NotificationPushService] WARNING: $message');
   }
 
   void _logError(String method, dynamic error) {
