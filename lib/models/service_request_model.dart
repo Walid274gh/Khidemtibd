@@ -2,15 +2,15 @@
 //
 // @Deprecated — use ServiceRequestEnhancedModel for all new code.
 //
-// This is the original push-model request with a plain String status field.
-// It predates the Hybrid Bid Model migration and is kept only to avoid
-// breaking any code that still imports it. New screens, controllers, and
-// services MUST use ServiceRequestEnhancedModel.
-//
-// Planned removal: after all consumers have been migrated and verified in
-// production, this file will be deleted.
+// STEP 6 MIGRATION:
+//   • Removed: import 'package:cloud_firestore/cloud_firestore.dart'
+//   • Replaced: Timestamp → ISO-8601 DateTime string (same pattern as
+//               ServiceRequestEnhancedModel which was already migrated).
+//   • fromMap() now parses createdAt/acceptedAt/completedAt from ISO-8601
+//     strings, DateTime, or legacy Timestamp-shaped Maps.
+//   • toMap() now serializes with toIso8601String() instead of
+//     Timestamp.fromDate().
 
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:equatable/equatable.dart';
 
 @Deprecated(
@@ -58,9 +58,9 @@ class ServiceRequestModel extends Equatable {
       userLongitude: (map['userLongitude'] as num?)?.toDouble() ?? 0.0,
       userAddress: map['userAddress'] as String? ?? '',
       description: map['description'] as String?,
-      createdAt: (map['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
-      acceptedAt: (map['acceptedAt'] as Timestamp?)?.toDate(),
-      completedAt: (map['completedAt'] as Timestamp?)?.toDate(),
+      createdAt: _parseDate(map['createdAt']),
+      acceptedAt: _parseDateOrNull(map['acceptedAt']),
+      completedAt: _parseDateOrNull(map['completedAt']),
     );
   }
 
@@ -74,10 +74,9 @@ class ServiceRequestModel extends Equatable {
       'userLongitude': userLongitude,
       'userAddress': userAddress,
       'description': description,
-      'createdAt': Timestamp.fromDate(createdAt),
-      'acceptedAt': acceptedAt != null ? Timestamp.fromDate(acceptedAt!) : null,
-      'completedAt':
-          completedAt != null ? Timestamp.fromDate(completedAt!) : null,
+      'createdAt': createdAt.toIso8601String(),
+      'acceptedAt': acceptedAt?.toIso8601String(),
+      'completedAt': completedAt?.toIso8601String(),
     };
   }
 
@@ -126,4 +125,27 @@ class ServiceRequestModel extends Equatable {
         acceptedAt,
         completedAt,
       ];
+}
+
+DateTime _parseDate(dynamic value) {
+  if (value == null) return DateTime.now();
+  if (value is DateTime) return value;
+  if (value is String) return DateTime.tryParse(value) ?? DateTime.now();
+  // Legacy Firestore Timestamp shape {_seconds, _nanoseconds}
+  if (value is Map) {
+    final seconds = value['_seconds'] as int? ?? value['seconds'] as int?;
+    if (seconds != null) return DateTime.fromMillisecondsSinceEpoch(seconds * 1000);
+  }
+  return DateTime.now();
+}
+
+DateTime? _parseDateOrNull(dynamic value) {
+  if (value == null) return null;
+  if (value is DateTime) return value;
+  if (value is String) return DateTime.tryParse(value);
+  if (value is Map) {
+    final seconds = value['_seconds'] as int? ?? value['seconds'] as int?;
+    if (seconds != null) return DateTime.fromMillisecondsSinceEpoch(seconds * 1000);
+  }
+  return null;
 }
