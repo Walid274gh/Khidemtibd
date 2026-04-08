@@ -1,44 +1,33 @@
 // lib/providers/core_providers.dart
 //
-// TASK 1 FIX — AuthService and LanguageService provider type migration.
+// STEP 6 MIGRATION: Firebase Firestore + Cloudinary + Gemini → ApiService + LocalMediaService + LocalAiService
 //
 // WHAT CHANGED:
-//
-// 1. authServiceProvider: ChangeNotifierProvider<AuthService> → Provider<AuthService>
-//    AuthService is now a plain singleton. Reactive auth state is driven by
-//    firebaseAuthStreamProvider in auth_providers.dart (stream from Firebase),
-//    not by AuthService's notifyListeners() cycle.
-//    All existing ref.watch(authServiceProvider) call sites that only need the
-//    service object for method calls continue to work — a plain Provider returns
-//    the stable singleton, no behavioural change except no spurious rebuilds.
-//
-// 2. languageServiceProvider: ChangeNotifierProvider<LanguageService> → Provider<LanguageService>
-//    LanguageService is now a plain singleton.
-//    Reactive locale state is driven by localeStateNotifierProvider (_LocaleStateNotifier
-//    adapter below), which listens to LanguageService's ChangeNotifier
-//    and exposes a typed Locale state via StateNotifierProvider. Only locale
-//    changes fire Riverpod rebuilds — not unrelated notifyListeners() calls.
-//
-// 3. currentLocaleProvider / currentLanguageCodeProvider / isRTLProvider:
-//    now watch localeStateNotifierProvider instead of languageServiceProvider.
-//
-// 4. currentLanguageNameProvider (new): exposes the display name for the
-//    current locale. Rebuilds when locale changes via localeStateNotifierProvider.
-//
-// 5. Removed unused imports: cloud_firestore, firebase_auth (both are now only
-//    imported by the files that actually use their types).
-//
-// 6. hasLocationPermissionProvider / hasAllCriticalPermissionsProvider:
-//    already migrated to .autoDispose in previous /state-apply session.
+//   • firestoreServiceProvider  → apiServiceProvider (Provider<ApiService>)
+//     - firestoreServiceProvider is kept as a TYPE-ALIAS pointing to apiServiceProvider
+//       so every existing controller (available_requests_controller, worker_home_controller,
+//       service_request_form_controller …) continues to compile without modification.
+//   • cloudinaryServiceProvider → localMediaServiceProvider (Provider<LocalMediaService>)
+//   • aiIntentExtractorProvider → localAiServiceProvider (Provider<LocalAiService>)
+//   • Added: realtimeServiceProvider (Provider<RealtimeService>)
+//   • Removed: cloud_firestore import, CloudinaryConfig, FirestoreService, CloudinaryService,
+//              AiIntentExtractorService
+//   • All Level-2 providers (workerBidService, serviceRequestService, smartSearch,
+//     notificationPush, realTimeLocation, geographicGrid) now inject apiServiceProvider.
+//   • API base URL: reads --dart-define=API_BASE_URL at build time; defaults to
+//     10.0.2.2:3000 (Android emulator) for debug builds.
+//     Production: flutter build apk --dart-define=API_BASE_URL=https://your-server.com
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/foundation.dart';
 
-import '../config/cloudinary_config.dart';
+import '../services/api_service.dart';
+import '../services/realtime_service.dart';
+import '../services/local_ai_service.dart';
+import '../services/local_media_service.dart';
 import '../services/analytics_service.dart';
 import '../services/auth_service.dart';
-import '../services/firestore_service.dart';
 import '../services/language_service.dart';
 import '../services/notification_push_service.dart';
 import '../services/native_channel_service.dart';
@@ -48,11 +37,9 @@ import '../services/wilaya_manager.dart';
 import '../services/geographic_grid_service.dart';
 import '../services/realtime_location_service.dart';
 import '../services/media_service.dart';
-import '../services/cloudinary_service.dart';
 import '../services/service_request_service.dart';
 import '../services/worker_bid_service.dart';
 import '../services/smart_search_service.dart';
-import '../services/ai_intent_extractor.dart';
 import '../services/audio_service.dart';
 import '../services/notification_service.dart';
 import '../services/routing_service.dart';
@@ -64,23 +51,70 @@ import '../models/service_request_enhanced_model.dart';
 import '../models/worker_bid_model.dart';
 export 'auth_providers.dart';
 
+// ── API Base URL ──────────────────────────────────────────────────────────────
+// Pass at build time: flutter run --dart-define=API_BASE_URL=http://192.168.1.x:3000
+// Android emulator default (10.0.2.2 → host machine localhost:3000)
+const String _kApiBaseUrl = String.fromEnvironment(
+  'API_BASE_URL',
+  defaultValue: 'http://10.0.2.2:3000',
+);
+
 // ============================================================================
-// AI INTENT EXTRACTOR
+// LOCAL AI SERVICE
 // ============================================================================
 
-final aiIntentExtractorProvider = Provider<AiIntentExtractorService>((ref) {
-  return AiIntentExtractorService();
+final localAiServiceProvider = Provider<LocalAiService>((ref) {
+  _logInfo('Initializing LocalAiService → $_kApiBaseUrl');
+  final service = LocalAiService(baseUrl: _kApiBaseUrl);
+  ref.onDispose(() {
+    _logInfo('Disposing LocalAiService');
+    service.dispose();
+  });
+  return service;
 });
 
 // ============================================================================
 // LEVEL 0 — INDEPENDENT SERVICES
 // ============================================================================
 
-final firestoreServiceProvider = Provider<FirestoreService>((ref) {
-  _logInfo('Initializing FirestoreService');
-  final service = FirestoreService();
+// ── Realtime WebSocket service ────────────────────────────────────────────────
+final realtimeServiceProvider = Provider<RealtimeService>((ref) {
+  _logInfo('Initializing RealtimeService → $_kApiBaseUrl');
+  final service = RealtimeService(baseUrl: _kApiBaseUrl);
+  ref.onDispose(() {
+    _logInfo('Disposing RealtimeService');
+    service.dispose();
+  });
+  return service;
+});
+
+// ── REST API service (replaces FirestoreService) ─────────────────────────────
+final apiServiceProvider = Provider<ApiService>((ref) {
+  _logInfo('Initializing ApiService → $_kApiBaseUrl');
+  final realtime = ref.watch(realtimeServiceProvider);
+  final service = ApiService(baseUrl: _kApiBaseUrl, realtime: realtime);
   service.startCacheCleanup();
-  ref.onDispose(() { _logInfo('Disposing FirestoreService'); service.dispose(); });
+  ref.onDispose(() {
+    _logInfo('Disposing ApiService');
+    service.dispose();
+  });
+  return service;
+});
+
+// ── BACKWARD-COMPAT ALIAS ────────────────────────────────────────────────────
+// All controllers that call ref.read(firestoreServiceProvider) continue to work.
+// ApiService exposes identical method signatures to FirestoreService.
+// New code should prefer apiServiceProvider directly.
+final firestoreServiceProvider = apiServiceProvider;
+
+// ── Local media service (replaces CloudinaryService) ─────────────────────────
+final localMediaServiceProvider = Provider<LocalMediaService>((ref) {
+  _logInfo('Initializing LocalMediaService → $_kApiBaseUrl');
+  final service = LocalMediaService(baseUrl: _kApiBaseUrl);
+  ref.onDispose(() {
+    _logInfo('Disposing LocalMediaService');
+    service.dispose();
+  });
   return service;
 });
 
@@ -105,10 +139,6 @@ final locationServiceProvider = Provider<LocationService>((ref) {
   return service;
 });
 
-// FIX (Task 1): ChangeNotifierProvider → Provider<LanguageService>.
-// LanguageService is now a plain singleton. Reactive locale state is driven
-// by localeStateNotifierProvider below, which adapts the ChangeNotifier into
-// a typed Riverpod StateNotifier — firing only on real locale changes.
 final languageServiceProvider = Provider<LanguageService>((ref) {
   _logInfo('Initializing LanguageService');
   final service = LanguageService();
@@ -121,15 +151,6 @@ final wilayaManagerProvider = Provider<WilayaManager>((ref) {
   final service = WilayaManager();
   ref.onDispose(() { _logInfo('Disposing WilayaManager'); service.dispose(); });
   return service;
-});
-
-final cloudinaryServiceProvider = Provider<CloudinaryService>((ref) {
-  _logInfo('Initializing CloudinaryService');
-  CloudinaryConfig.validate();
-  return CloudinaryService(
-    cloudName:    CloudinaryConfig.cloudName,
-    uploadPreset: CloudinaryConfig.uploadPreset,
-  );
 });
 
 final routingServiceProvider = Provider<RoutingService>((ref) {
@@ -178,8 +199,8 @@ final analyticsServiceProvider = Provider<AnalyticsService>((ref) {
 
 final mediaServiceProvider = Provider<MediaService>((ref) {
   _logInfo('Initializing MediaService');
-  final cloudinaryService = ref.watch(cloudinaryServiceProvider);
-  final service = MediaService(cloudinaryService);
+  final localMedia = ref.watch(localMediaServiceProvider);
+  final service = MediaService(localMedia);
   ref.onDispose(() async { _logInfo('Disposing MediaService'); await service.dispose(); });
   return service;
 });
@@ -187,28 +208,16 @@ final mediaServiceProvider = Provider<MediaService>((ref) {
 final geographicGridServiceProvider = Provider<GeographicGridService>((ref) {
   _logInfo('Initializing GeographicGridService');
   final service = GeographicGridService(
-    ref.watch(firestoreServiceProvider),
+    ref.watch(apiServiceProvider),
     ref.watch(wilayaManagerProvider),
   );
   ref.onDispose(() { _logInfo('Disposing GeographicGridService'); service.dispose(); });
   return service;
 });
 
-// FIX (Task 1): ChangeNotifierProvider<AuthService> → Provider<AuthService>.
-// AuthService is now a plain singleton used only for method calls (signIn,
-// signUp, signOut, etc.). Reactive auth state is driven by
-// firebaseAuthStreamProvider in auth_providers.dart, which listens directly to
-// Firebase's authStateChanges() stream — eliminating all spurious Riverpod
-// rebuilds caused by AuthService's internal isLoading flip cycle.
-//
-// All existing ref.watch(authServiceProvider) and ref.read(authServiceProvider)
-// call sites continue to work unchanged. The difference: ref.watch no longer
-// subscribes to ChangeNotifier notifications, so providers that injected
-// AuthService (notificationPushService, realTimeLocationService) no longer
-// rebuild on every signIn/signOut step.
 final authServiceProvider = Provider<AuthService>((ref) {
   _logInfo('Initializing AuthService');
-  final service = AuthService(ref.watch(firestoreServiceProvider));
+  final service = AuthService(ref.watch(apiServiceProvider));
   ref.onDispose(() { _logInfo('Disposing AuthService'); service.dispose(); });
   return service;
 });
@@ -221,7 +230,7 @@ final notificationPushServiceProvider = Provider<NotificationPushService>((ref) 
   _logInfo('Initializing NotificationPushService');
   final service = NotificationPushService(
     ref.watch(authServiceProvider),
-    ref.watch(firestoreServiceProvider),
+    ref.watch(apiServiceProvider),
   );
   ref.onDispose(() async { _logInfo('Disposing NotificationPushService'); await service.dispose(); });
   return service;
@@ -231,7 +240,7 @@ final realTimeLocationServiceProvider = Provider<RealTimeLocationService>((ref) 
   _logInfo('Initializing RealTimeLocationService');
   final service = RealTimeLocationService(
     ref.watch(authServiceProvider),
-    ref.watch(firestoreServiceProvider),
+    ref.watch(apiServiceProvider),
   );
   ref.onDispose(() async { _logInfo('Disposing RealTimeLocationService'); await service.dispose(); });
   return service;
@@ -240,7 +249,7 @@ final realTimeLocationServiceProvider = Provider<RealTimeLocationService>((ref) 
 final serviceRequestServiceProvider = Provider<ServiceRequestService>((ref) {
   _logInfo('Initializing ServiceRequestService');
   final service = ServiceRequestService(
-    ref.watch(firestoreServiceProvider),
+    ref.watch(apiServiceProvider),
     ref.watch(mediaServiceProvider),
     ref.watch(geographicGridServiceProvider),
   );
@@ -250,7 +259,7 @@ final serviceRequestServiceProvider = Provider<ServiceRequestService>((ref) {
 
 final workerBidServiceProvider = Provider<WorkerBidService>((ref) {
   _logInfo('Initializing WorkerBidService');
-  final service = WorkerBidService(ref.watch(firestoreServiceProvider));
+  final service = WorkerBidService(ref.watch(apiServiceProvider));
   ref.onDispose(() { _logInfo('Disposing WorkerBidService'); service.dispose(); });
   return service;
 });
@@ -258,7 +267,7 @@ final workerBidServiceProvider = Provider<WorkerBidService>((ref) {
 final smartSearchServiceProvider = Provider<SmartSearchService>((ref) {
   _logInfo('Initializing SmartSearchService');
   final service = SmartSearchService(
-    ref.watch(firestoreServiceProvider),
+    ref.watch(apiServiceProvider),
     ref.watch(geographicGridServiceProvider),
     ref.watch(wilayaManagerProvider),
   );
@@ -267,21 +276,8 @@ final smartSearchServiceProvider = Provider<SmartSearchService>((ref) {
 });
 
 // ============================================================================
-// LANGUAGE — LOCALE STATE ADAPTER (Task 1)
+// LANGUAGE — LOCALE STATE ADAPTER
 // ============================================================================
-//
-// _LocaleStateNotifier bridges LanguageService (ChangeNotifier) and Riverpod.
-// It adds itself as a listener to LanguageService and propagates locale changes
-// into a typed StateNotifier<Locale>. This means:
-//   • Only actual locale changes cause Riverpod rebuilds.
-//   • LanguageService's other ChangeNotifier callbacks (e.g. initialization)
-//     are absorbed correctly because the state only changes when the locale value
-//     itself differs from the previous one (StateNotifier's equality check).
-//
-// Consumers that previously watched languageServiceProvider for display of the
-// current locale name should now watch currentLocaleProvider or
-// currentLanguageNameProvider instead. For method calls (changeToFrench(), etc.),
-// use ref.read(languageServiceProvider).
 
 class _LocaleStateNotifier extends StateNotifier<Locale> {
   final LanguageService _service;
@@ -291,8 +287,6 @@ class _LocaleStateNotifier extends StateNotifier<Locale> {
   }
 
   void _onLocaleChanged() {
-    // Only update if the locale value actually changed — StateNotifier's
-    // equality check prevents spurious downstream rebuilds.
     final newLocale = _service.currentLocale;
     if (newLocale != state) state = newLocale;
   }
@@ -304,9 +298,6 @@ class _LocaleStateNotifier extends StateNotifier<Locale> {
   }
 }
 
-/// Reactive locale state — the single source of truth for the app's locale.
-/// Rebuilds only when the locale changes, not on unrelated LanguageService
-/// notifications.
 final localeStateNotifierProvider =
     StateNotifierProvider<_LocaleStateNotifier, Locale>((ref) {
   return _LocaleStateNotifier(ref.watch(languageServiceProvider));
@@ -316,11 +307,6 @@ final localeStateNotifierProvider =
 // LANGUAGE & LOCALE — DERIVED PROVIDERS
 // ============================================================================
 
-// FIX (Task 1): These providers now watch localeStateNotifierProvider instead
-// of languageServiceProvider. Previously they subscribed to the ChangeNotifier
-// directly, which rebuilt them on any notifyListeners() call from LanguageService.
-// Now they only rebuild when the locale value itself changes.
-
 final currentLocaleProvider = Provider<Locale>((ref) =>
     ref.watch(localeStateNotifierProvider));
 
@@ -328,15 +314,10 @@ final currentLanguageCodeProvider = Provider<String>((ref) =>
     ref.watch(localeStateNotifierProvider).languageCode);
 
 final isRTLProvider = Provider<bool>((ref) {
-  // Compute RTL from locale directly instead of asking LanguageService
-  // (avoids subscribing to the full ChangeNotifier).
   final langCode = ref.watch(localeStateNotifierProvider).languageCode;
   return langCode == 'ar';
 });
 
-/// Display name for the current locale (e.g. "Français", "English", "العربية").
-/// Rebuilds when locale changes. Use this in UI instead of reading
-/// languageService.currentLanguageName directly.
 final currentLanguageNameProvider = Provider<String>((ref) {
   final locale = ref.watch(localeStateNotifierProvider);
   return ref.read(languageServiceProvider).getLanguageName(locale.languageCode);
@@ -346,7 +327,6 @@ final currentLanguageNameProvider = Provider<String>((ref) {
 // PERMISSIONS
 // ============================================================================
 
-// .autoDispose added in previous /state-apply session — unchanged.
 final hasLocationPermissionProvider = FutureProvider.autoDispose<bool>((ref) async {
   try {
     return await ref.watch(permissionServiceProvider).hasLocationPermission();
@@ -365,28 +345,28 @@ final hasAllCriticalPermissionsProvider = FutureProvider.autoDispose<bool>((ref)
 
 final userProfileProvider = FutureProvider.family
     .autoDispose<UserModel?, String>((ref, String userId) async {
-  final firestoreService = ref.watch(firestoreServiceProvider);
+  final api = ref.watch(apiServiceProvider);
   if (userId.trim().isEmpty) throw ArgumentError('User ID cannot be empty');
   try {
-    return await firestoreService.getUser(userId);
+    return await api.getUser(userId);
   } catch (e) { _logError('userProfileProvider($userId)', e); rethrow; }
 });
 
 final workerProfileProvider = FutureProvider.family
     .autoDispose<WorkerModel?, String>((ref, String workerId) async {
-  final firestoreService = ref.watch(firestoreServiceProvider);
+  final api = ref.watch(apiServiceProvider);
   if (workerId.trim().isEmpty) throw ArgumentError('Worker ID cannot be empty');
   try {
-    return await firestoreService.getWorker(workerId);
+    return await api.getWorker(workerId);
   } catch (e) { _logError('workerProfileProvider($workerId)', e); rethrow; }
 });
 
 final serviceRequestProvider = FutureProvider.family
     .autoDispose<ServiceRequestEnhancedModel?, String>((ref, String requestId) async {
-  final firestoreService = ref.watch(firestoreServiceProvider);
+  final api = ref.watch(apiServiceProvider);
   if (requestId.trim().isEmpty) throw ArgumentError('Request ID cannot be empty');
   try {
-    return await firestoreService.getServiceRequest(requestId);
+    return await api.getServiceRequest(requestId);
   } catch (e) { _logError('serviceRequestProvider($requestId)', e); rethrow; }
 });
 
@@ -396,31 +376,31 @@ final serviceRequestProvider = FutureProvider.family
 
 final userServiceRequestsStreamProvider = StreamProvider.family
     .autoDispose<List<ServiceRequestEnhancedModel>, String>((ref, String userId) {
-  final firestoreService = ref.watch(firestoreServiceProvider);
+  final api = ref.watch(apiServiceProvider);
   if (userId.trim().isEmpty)
     return Stream.error(ArgumentError('User ID cannot be empty'));
   try {
-    return firestoreService.streamUserServiceRequests(userId);
+    return api.streamUserServiceRequests(userId);
   } catch (e) { _logError('userServiceRequestsStreamProvider', e); return Stream.error(e); }
 });
 
 final workerServiceRequestsStreamProvider = StreamProvider.family
     .autoDispose<List<ServiceRequestEnhancedModel>, String>((ref, String workerId) {
-  final firestoreService = ref.watch(firestoreServiceProvider);
+  final api = ref.watch(apiServiceProvider);
   if (workerId.trim().isEmpty)
     return Stream.error(ArgumentError('Worker ID cannot be empty'));
   try {
-    return firestoreService.streamWorkerServiceRequests(workerId);
+    return api.streamWorkerServiceRequests(workerId);
   } catch (e) { _logError('workerServiceRequestsStreamProvider', e); return Stream.error(e); }
 });
 
 final serviceRequestStreamProvider = StreamProvider.family
     .autoDispose<ServiceRequestEnhancedModel?, String>((ref, String requestId) {
-  final firestoreService = ref.watch(firestoreServiceProvider);
+  final api = ref.watch(apiServiceProvider);
   if (requestId.trim().isEmpty)
     return Stream.error(ArgumentError('Request ID cannot be empty'));
   try {
-    return firestoreService.streamServiceRequest(requestId);
+    return api.streamServiceRequest(requestId);
   } catch (e) { _logError('serviceRequestStreamProvider', e); return Stream.error(e); }
 });
 
@@ -470,7 +450,7 @@ final workerBidsStreamProvider = StreamProvider.family
 
 final servicesInitializedProvider = Provider<bool>((ref) {
   try {
-    ref.watch(firestoreServiceProvider);
+    ref.watch(apiServiceProvider);
     ref.watch(authServiceProvider);
     ref.watch(languageServiceProvider);
     _logInfo('All services initialized successfully');

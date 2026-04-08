@@ -1,4 +1,11 @@
 // lib/providers/home_search_controller.dart
+//
+// STEP 6 MIGRATION:
+//   • Removed: import '../services/ai_intent_extractor.dart'
+//   • Added:   import '../services/local_ai_service.dart'
+//   • Replaced: ref.read(aiIntentExtractorProvider) → ref.read(localAiServiceProvider)
+//   • AiIntentExtractorException / AiExtractorErrorCode unchanged — LocalAiService
+//     exports the same exception types so all catch blocks compile as-is.
 
 import 'dart:io';
 import 'dart:typed_data';
@@ -8,7 +15,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/search_intent.dart';
 import '../models/search_result_model.dart';
 import '../models/worker_model.dart';
-import '../services/ai_intent_extractor.dart';
+import '../services/local_ai_service.dart';
 import '../utils/model_extensions.dart';
 import '../utils/constants.dart';
 import '../utils/logger.dart';
@@ -96,14 +103,6 @@ class HomeSearchController extends StateNotifier<HomeSearchState> {
   static const Duration _windowDuration  = Duration(hours: 1);
   final List<DateTime>  _callTimestamps  = [];
 
-  // FIX: AI confidence thresholds.
-  // Below _lowConfidenceThreshold → intent is too ambiguous; fall back to
-  // unfiltered nearby workers instead of propagating a weak profession guess.
-  // Below _highConfidenceThreshold → intent is usable but log a warning.
-  //
-  // Calibrate both values after 100+ real queries:
-  //   _lowConfidenceThreshold  = 25th percentile of correct-match confidences
-  //   _highConfidenceThreshold = 70th percentile of correct-match confidences
   static const double _lowConfidenceThreshold  = 0.35;
   static const double _highConfidenceThreshold = 0.70;
 
@@ -158,7 +157,8 @@ class HomeSearchController extends StateNotifier<HomeSearchState> {
 
     SearchIntent intent;
     try {
-      final extractor = _ref.read(aiIntentExtractorProvider);
+      // STEP 6: localAiServiceProvider replaces aiIntentExtractorProvider
+      final extractor = _ref.read(localAiServiceProvider);
       intent = await extractor.extract(text,
           imageBytes: imageBytes, mime: mime);
       _recordCall();
@@ -181,9 +181,6 @@ class HomeSearchController extends StateNotifier<HomeSearchState> {
       return;
     }
 
-    // FIX: confidence gate — clear profession on weak extractions so that
-    // _search() falls back to unfiltered nearby workers rather than
-    // propagating a low-confidence profession guess to the map.
     final gatedIntent = _applyConfidenceGate(intent);
 
     state = state.copyWith(
@@ -295,7 +292,8 @@ class HomeSearchController extends StateNotifier<HomeSearchState> {
 
     SearchIntent intent;
     try {
-      final extractor = _ref.read(aiIntentExtractorProvider);
+      // STEP 6: localAiServiceProvider replaces aiIntentExtractorProvider
+      final extractor = _ref.read(localAiServiceProvider);
       intent = await extractor.extractFromAudio(audioBytes);
       _recordCall();
       AppLogger.info(
@@ -321,7 +319,6 @@ class HomeSearchController extends StateNotifier<HomeSearchState> {
 
     if (!mounted) return;
 
-    // FIX: apply confidence gate to audio-extracted intent as well.
     final gatedIntent = _applyConfidenceGate(intent);
 
     state = state.copyWith(
@@ -384,9 +381,6 @@ class HomeSearchController extends StateNotifier<HomeSearchState> {
         }).toList();
       }
 
-      // FIX: replaced degenerate min-max normalization with RankingUtils.minMaxNormalize
-      // which returns 0.5 when the range collapses (all workers have equal rating
-      // or equal distance), preventing the score from blowing up or all collapsing to 0.
       final maxRating = pool
           .map((r) => r.data.averageRating)
           .reduce((a, b) => a > b ? a : b);
@@ -406,7 +400,6 @@ class HomeSearchController extends StateNotifier<HomeSearchState> {
       for (final r in pool) {
         final normRating = RankingUtils.minMaxNormalize(
             r.data.averageRating, minRating, maxRating);
-        // Higher distance → lower score: invert normalized distance.
         final normDist = 1.0 -
             RankingUtils.minMaxNormalize(r.distance, minDist, maxDist);
         final score = normRating * 0.6 + normDist * 0.4;
@@ -434,16 +427,8 @@ class HomeSearchController extends StateNotifier<HomeSearchState> {
   // Private helpers
   // --------------------------------------------------------------------------
 
-  /// FIX: Apply confidence gate to extracted intent.
-  ///
-  /// Below [_lowConfidenceThreshold] (0.35): the AI could not reliably
-  /// identify a profession. Clear profession so search falls back to all
-  /// nearby workers rather than surfacing a wrong service category.
-  ///
-  /// Between thresholds: usable but log a warning so the team can monitor
-  /// mid-confidence performance and adjust thresholds from real data.
   SearchIntent _applyConfidenceGate(SearchIntent intent) {
-    final confidence = intent.confidence ?? 1.0; // default 1.0 if not set
+    final confidence = intent.confidence ?? 1.0;
 
     if (confidence < _lowConfidenceThreshold) {
       AppLogger.warning(
