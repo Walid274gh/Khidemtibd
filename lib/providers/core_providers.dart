@@ -1,12 +1,11 @@
 // lib/providers/core_providers.dart
 //
-// CHANGE vs previous version:
-//   BEFORE: const String _kApiBaseUrl = String.fromEnvironment('API_BASE_URL', defaultValue: '...');
-//   AFTER:  String get _kApiBaseUrl => AppConfig.apiBaseUrl
+// URL resolution: AppConfig.initialize() runs in main.dart BEFORE runApp().
+// By the time ANY provider here reads _kApiBaseUrl, the 3-layer resolution
+// (Firebase Remote Config → --dart-define → hardcoded) is already complete.
+// No rebuild is needed — just kill & relaunch the app after changing Remote Config.
 //
-// AppConfig.initialize() is called in main.dart BEFORE runApp(),
-// so AppConfig.apiBaseUrl is always resolved by the time any provider reads it.
-// No rebuild needed — just update Firebase Remote Config → kill & relaunch app.
+// Debug: check which layer resolved via AppConfig.resolvedVia (in debug logs).
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -39,11 +38,25 @@ import '../models/user_model.dart';
 import '../models/worker_model.dart';
 import '../models/service_request_enhanced_model.dart';
 import '../models/worker_bid_model.dart';
-import '../utils/app_config.dart'; // ← AppConfig.apiBaseUrl
+import '../utils/app_config.dart';
 export 'auth_providers.dart';
 
-// ── API Base URL — reads from AppConfig (Firebase Remote Config → compile fallback)
-// Change without rebuild: Firebase Console → Remote Config → api_base_url → Publish
+// ─────────────────────────────────────────────────────────────────────────────
+// API Base URL
+//
+// Resolved lazily on first read — always after AppConfig.initialize() in main.
+// Use apiBaseUrlProvider in tests to override the URL without touching AppConfig.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Exposes the resolved API base URL as a Riverpod provider.
+/// Override in tests: ProviderScope(overrides: [apiBaseUrlProvider.overrideWith(...)])
+final apiBaseUrlProvider = Provider<String>((ref) {
+  final url = AppConfig.apiBaseUrl;
+  _logInfo('API base URL = $url (via ${AppConfig.resolvedVia})');
+  return url;
+});
+
+// Shorthand used internally — keeps call-sites identical to the old pattern.
 String get _kApiBaseUrl => AppConfig.apiBaseUrl;
 
 // ============================================================================
@@ -86,7 +99,7 @@ final apiServiceProvider = Provider<ApiService>((ref) {
   return service;
 });
 
-// Backward-compat alias — all controllers that use firestoreServiceProvider still work
+// Backward-compat alias
 final firestoreServiceProvider = apiServiceProvider;
 
 final localMediaServiceProvider = Provider<LocalMediaService>((ref) {
