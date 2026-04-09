@@ -1,22 +1,12 @@
 // lib/providers/core_providers.dart
 //
-// STEP 6 MIGRATION: Firebase Firestore + Cloudinary + Gemini → ApiService + LocalMediaService + LocalAiService
+// CHANGE vs previous version:
+//   BEFORE: const String _kApiBaseUrl = String.fromEnvironment('API_BASE_URL', defaultValue: '...');
+//   AFTER:  String get _kApiBaseUrl => AppConfig.apiBaseUrl
 //
-// WHAT CHANGED:
-//   • firestoreServiceProvider  → apiServiceProvider (Provider<ApiService>)
-//     - firestoreServiceProvider is kept as a TYPE-ALIAS pointing to apiServiceProvider
-//       so every existing controller (available_requests_controller, worker_home_controller,
-//       service_request_form_controller …) continues to compile without modification.
-//   • cloudinaryServiceProvider → localMediaServiceProvider (Provider<LocalMediaService>)
-//   • aiIntentExtractorProvider → localAiServiceProvider (Provider<LocalAiService>)
-//   • Added: realtimeServiceProvider (Provider<RealtimeService>)
-//   • Removed: cloud_firestore import, CloudinaryConfig, FirestoreService, CloudinaryService,
-//              AiIntentExtractorService
-//   • All Level-2 providers (workerBidService, serviceRequestService, smartSearch,
-//     notificationPush, realTimeLocation, geographicGrid) now inject apiServiceProvider.
-//   • API base URL: reads --dart-define=API_BASE_URL at build time; defaults to
-//     10.0.2.2:3000 (Android emulator) for debug builds.
-//     Production: flutter build apk --dart-define=API_BASE_URL=https://your-server.com
+// AppConfig.initialize() is called in main.dart BEFORE runApp(),
+// so AppConfig.apiBaseUrl is always resolved by the time any provider reads it.
+// No rebuild needed — just update Firebase Remote Config → kill & relaunch app.
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -49,22 +39,19 @@ import '../models/user_model.dart';
 import '../models/worker_model.dart';
 import '../models/service_request_enhanced_model.dart';
 import '../models/worker_bid_model.dart';
+import '../utils/app_config.dart'; // ← AppConfig.apiBaseUrl
 export 'auth_providers.dart';
 
-// ── API Base URL ──────────────────────────────────────────────────────────────
-// Pass at build time: flutter run --dart-define=API_BASE_URL=http://192.168.1.x:3000
-// Android emulator default (10.0.2.2 → host machine localhost:3000)
-const String _kApiBaseUrl = String.fromEnvironment(
-  'API_BASE_URL',
-  defaultValue: 'http://10.0.2.2:3000',
-);
+// ── API Base URL — reads from AppConfig (Firebase Remote Config → compile fallback)
+// Change without rebuild: Firebase Console → Remote Config → api_base_url → Publish
+String get _kApiBaseUrl => AppConfig.apiBaseUrl;
 
 // ============================================================================
 // LOCAL AI SERVICE
 // ============================================================================
 
 final localAiServiceProvider = Provider<LocalAiService>((ref) {
-  _logInfo('Initializing LocalAiService → $_kApiBaseUrl');
+  _logInfo('Initializing LocalAiService → ${_kApiBaseUrl}');
   final service = LocalAiService(baseUrl: _kApiBaseUrl);
   ref.onDispose(() {
     _logInfo('Disposing LocalAiService');
@@ -77,9 +64,8 @@ final localAiServiceProvider = Provider<LocalAiService>((ref) {
 // LEVEL 0 — INDEPENDENT SERVICES
 // ============================================================================
 
-// ── Realtime WebSocket service ────────────────────────────────────────────────
 final realtimeServiceProvider = Provider<RealtimeService>((ref) {
-  _logInfo('Initializing RealtimeService → $_kApiBaseUrl');
+  _logInfo('Initializing RealtimeService → ${_kApiBaseUrl}');
   final service = RealtimeService(baseUrl: _kApiBaseUrl);
   ref.onDispose(() {
     _logInfo('Disposing RealtimeService');
@@ -88,9 +74,8 @@ final realtimeServiceProvider = Provider<RealtimeService>((ref) {
   return service;
 });
 
-// ── REST API service (replaces FirestoreService) ─────────────────────────────
 final apiServiceProvider = Provider<ApiService>((ref) {
-  _logInfo('Initializing ApiService → $_kApiBaseUrl');
+  _logInfo('Initializing ApiService → ${_kApiBaseUrl}');
   final realtime = ref.watch(realtimeServiceProvider);
   final service = ApiService(baseUrl: _kApiBaseUrl, realtime: realtime);
   service.startCacheCleanup();
@@ -101,15 +86,11 @@ final apiServiceProvider = Provider<ApiService>((ref) {
   return service;
 });
 
-// ── BACKWARD-COMPAT ALIAS ────────────────────────────────────────────────────
-// All controllers that call ref.read(firestoreServiceProvider) continue to work.
-// ApiService exposes identical method signatures to FirestoreService.
-// New code should prefer apiServiceProvider directly.
+// Backward-compat alias — all controllers that use firestoreServiceProvider still work
 final firestoreServiceProvider = apiServiceProvider;
 
-// ── Local media service (replaces CloudinaryService) ─────────────────────────
 final localMediaServiceProvider = Provider<LocalMediaService>((ref) {
-  _logInfo('Initializing LocalMediaService → $_kApiBaseUrl');
+  _logInfo('Initializing LocalMediaService → ${_kApiBaseUrl}');
   final service = LocalMediaService(baseUrl: _kApiBaseUrl);
   ref.onDispose(() {
     _logInfo('Disposing LocalMediaService');
@@ -302,10 +283,6 @@ final localeStateNotifierProvider =
     StateNotifierProvider<_LocaleStateNotifier, Locale>((ref) {
   return _LocaleStateNotifier(ref.watch(languageServiceProvider));
 });
-
-// ============================================================================
-// LANGUAGE & LOCALE — DERIVED PROVIDERS
-// ============================================================================
 
 final currentLocaleProvider = Provider<Locale>((ref) =>
     ref.watch(localeStateNotifierProvider));
