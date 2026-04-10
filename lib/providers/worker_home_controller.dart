@@ -18,9 +18,16 @@
 //   • Removed: `import '../services/firestore_service.dart'` (collection
 //     constants were only needed for the inline queries).
 //
-// All Firestore write paths (toggleOnlineStatus → updateWorkerStatus, startJob,
-// completeJob, cancelRequest) were already routed through firestoreServiceProvider
-// by the previous security fix — unchanged.
+// FIX (MIGRATION P2 — streamWorker null):
+//   RealtimeService.streamWorker() émet `null` comme signal de changement
+//   (location update, status change) — pas comme indication que le profil
+//   n'existe pas. L'ancien code traitait null comme une erreur fatale et
+//   set AsyncError, ce qui causait un flash d'erreur dans le HomeScreen à
+//   chaque mise à jour de localisation.
+//
+//   AVANT : null → state = AsyncError('Worker profile not found')
+//   APRÈS : null → re-fetch via getWorker(uid) et mettre à jour silencieusement.
+//           Si le re-fetch échoue réellement → alors et seulement alors, error.
 
 import 'dart:async';
 
@@ -123,6 +130,9 @@ class WorkerHomeController extends StateNotifier<WorkerHomeState> {
   // TASK 2 FIX: type changed to match the typed stream returns.
   StreamSubscription<WorkerModel?>?                         _workerSub;
   StreamSubscription<List<ServiceRequestEnhancedModel>>?    _requestsSub;
+
+  /// uid conservé pour le re-fetch silencieux sur null de streamWorker.
+  String? _trackedUid;
 
   WorkerHomeController(this._ref) : super(const WorkerHomeState()) {
     _initialize();
@@ -334,35 +344,69 @@ class WorkerHomeController extends StateNotifier<WorkerHomeState> {
       return;
     }
 
+    _trackedUid = uid;
     AppLogger.info('WorkerHomeController: initialising for uid=$uid');
     _subscribeToWorker(uid);
   }
 
   // --------------------------------------------------------------------------
   // TASK 2 FIX — stream via firestoreServiceProvider
+  // FIX (MIGRATION P2) — null = signal de changement, pas une erreur fatale
   // --------------------------------------------------------------------------
 
   /// TASK 2 FIX: replaced FirebaseFirestore.instance.collection('workers')
   /// .doc(uid).snapshots() with firestoreServiceProvider.streamWorker(uid).
   ///
-  /// streamWorker() is already implemented in WorkerFirestoreRepository and
-  /// exposed via FirestoreService — it returns Stream<WorkerModel?> with
-  /// parsing and cache-warming handled by the repository layer.
+  /// FIX (MIGRATION P2):
+  ///   RealtimeService.streamWorker() émet `null` chaque fois qu'un event
+  ///   worker:location ou worker:status arrive — c'est un signal de changement,
+  ///   pas une indication que le profil est introuvable.
+  ///
+  ///   AVANT : null → state = AsyncError → flash d'erreur à chaque mouvement GPS.
+  ///   APRÈS : null → re-fetch silencieux getWorker(uid) → mise à jour douce.
+  ///           Erreur réelle uniquement si le re-fetch lui-même échoue.
   void _subscribeToWorker(String uid) {
     _workerSub?.cancel();
     _workerSub = _ref
         .read(firestoreServiceProvider)
         .streamWorker(uid)
         .listen(
-      (worker) {
+      (worker) async {
         if (!mounted) return;
+
         if (worker == null) {
-          state = state.copyWith(
-            workerAsync: AsyncValue.error(
-                Exception('Worker profile not found'), StackTrace.current),
+          // FIX: null = signal de changement émis par RealtimeService.
+          // On re-fetch silencieusement pour obtenir les données à jour.
+          AppLogger.debug(
+            'WorkerHomeController: streamWorker emitted null '
+            '(change signal) — re-fetching uid=$uid',
           );
+          try {
+            final refreshed = await _ref
+                .read(firestoreServiceProvider)
+                .getWorker(uid);
+            if (!mounted) return;
+            if (refreshed != null) {
+              state = state.copyWith(workerAsync: AsyncValue.data(refreshed));
+            } else {
+              // Le profil n'existe vraiment pas — erreur légitime.
+              state = state.copyWith(
+                workerAsync: AsyncValue.error(
+                  Exception('Worker profile not found'),
+                  StackTrace.current,
+                ),
+              );
+            }
+          } catch (e) {
+            // Re-fetch échoué (réseau) : garder l'état actuel sans crasher.
+            AppLogger.warning(
+              'WorkerHomeController: re-fetch after null signal failed '
+              '(keeping current state): $e',
+            );
+          }
           return;
         }
+
         AppLogger.debug(
             'WorkerHomeController: worker snapshot — online=${worker.isOnline}');
         state = state.copyWith(workerAsync: AsyncValue.data(worker));
@@ -381,10 +425,6 @@ class WorkerHomeController extends StateNotifier<WorkerHomeState> {
   /// TASK 2 FIX: replaced FirebaseFirestore.instance.collection(
   /// 'service_requests').where('workerId',...).limit(30).snapshots()
   /// with firestoreServiceProvider.streamWorkerAssignedRequests(workerId).
-  ///
-  /// The repository constructs the same query and returns typed
-  /// List<ServiceRequestEnhancedModel>, so doc-to-model conversion is
-  /// no longer the controller's responsibility.
   void _subscribeToRequests(String workerId) {
     if (_requestsSub != null) return;
 

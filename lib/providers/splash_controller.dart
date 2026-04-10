@@ -178,12 +178,25 @@ class SplashController extends StateNotifier<SplashState> {
     }
   }
 
+  /// FIX (MIGRATION — collection unifiée) :
+  /// Remplace le pattern getWorker(uid) → role=worker|client par une seule
+  /// requête getUser(uid) + check userDoc.isWorker.
+  ///
+  /// AVANT : GET /workers/:uid — retournait null pour les clients, non-null
+  ///         pour les workers. Requête inutile : la collection workers n'existe
+  ///         plus, les workers sont dans users avec role='worker'.
+  ///
+  /// APRÈS : GET /users/:uid — retourne le document unifié avec le champ role.
+  ///         userDoc.isWorker == true  →  UserRole.worker
+  ///         userDoc.isWorker == false →  UserRole.client
+  ///         null (pas encore inscrit) →  UserRole.client (défaut sûr)
   Future<void> _resolveAndCacheRole(String uid) async {
     try {
       final firestoreService = _ref.read(firestoreServiceProvider);
 
-      final worker = await firestoreService
-          .getWorker(uid)
+      // Une seule requête — le champ `role` est dans le document unifié.
+      final userDoc = await firestoreService
+          .getUser(uid)
           .timeout(
             _kRoleResolveTimeout,
             onTimeout: () {
@@ -196,7 +209,7 @@ class SplashController extends StateNotifier<SplashState> {
             },
           );
 
-      final role = worker != null ? UserRole.worker : UserRole.client;
+      final role = userDoc?.isWorker == true ? UserRole.worker : UserRole.client;
 
       setCachedUserRole(_ref, role);
 

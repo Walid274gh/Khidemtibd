@@ -177,6 +177,28 @@ class AvailableRequestsController
         return;
       }
 
+      // FIX (P0 — MIGRATION): profession est maintenant String? dans UserModel.
+      // Un worker sans profession renseignée ne peut pas souscrire aux demandes
+      // disponibles (serviceType est required String côté API).
+      // On bloque ici avec un message clair plutôt que de crasher.
+      final profession = _worker!.profession;
+      if (profession == null || profession.isEmpty) {
+        if (!mounted) return;
+        state = state.copyWith(
+          requestsAsync: AsyncValue.error(
+            'worker_profession_missing',
+            StackTrace.current,
+          ),
+        );
+        if (kDebugMode) {
+          debugPrint(
+            '[AvailableRequestsController] Worker $userId has no profession set — '
+            'cannot subscribe to available requests.',
+          );
+        }
+        return;
+      }
+
       _subscribeToRequests();
       _subscribeToBids(userId);
     } catch (e, st) {
@@ -193,6 +215,20 @@ class AvailableRequestsController
   void _subscribeToRequests() {
     if (_worker == null) return;
 
+    // FIX (P0 — MIGRATION): profession est String? — guard obligatoire.
+    // _init() vérifie déjà que profession != null avant d'appeler cette méthode,
+    // mais on garde le guard ici en défense pour tout appel futur direct.
+    final profession = _worker!.profession;
+    if (profession == null || profession.isEmpty) {
+      if (kDebugMode) {
+        debugPrint(
+          '[AvailableRequestsController] _subscribeToRequests skipped: '
+          'worker has no profession.',
+        );
+      }
+      return;
+    }
+
     state = state.copyWith(
       requestsAsync: const AsyncValue.loading(),
     );
@@ -202,7 +238,7 @@ class AvailableRequestsController
         .read(firestoreServiceProvider)
         .streamAvailableRequests(
           wilayaCode:  _worker!.wilayaCode ?? 31,
-          serviceType: _worker!.profession,
+          serviceType: profession,             // ✅ String (non-null garanti)
         )
         .listen(
       (requests) {

@@ -23,6 +23,15 @@
 //   meaning that if signOut threw an exception the role pref was already wiped
 //   — leaving the user in a broken state where the app thought they were a
 //   client even though they were still authenticated as a worker.
+//
+// FIX (MIGRATION — collection unifiée) :
+//   _loadProfileData() faisait jusqu'à 3 appels HTTP :
+//     1. getWorker(uid) si rôle en cache
+//     2. getWorker(uid) si rôle non-caché
+//     3. getUser(uid)   si getWorker == null
+//   Remplacé par 1 seul appel getUser(uid) — le champ `role` du document
+//   unifié discrimine worker vs client. Les champs worker (profession,
+//   averageRating, ratingCount…) sont portés par le même document UserModel.
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -112,6 +121,20 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
     _loadProfileData();
   }
 
+  /// FIX (MIGRATION — collection unifiée) :
+  ///
+  /// AVANT — jusqu'à 3 appels HTTP :
+  ///   • Branche "rôle caché worker" : getWorker(uid)
+  ///   • Branche "slow path"         : getWorker(uid)  puis  getUser(uid)
+  ///
+  /// APRÈS — 1 seul appel HTTP :
+  ///   • getUser(uid) retourne le document unifié avec le champ `role`.
+  ///   • userDoc.isWorker == true  → branche worker (profession, rating…)
+  ///   • userDoc.isWorker == false → branche client
+  ///   • null                      → fallback Firebase displayName
+  ///
+  /// Les champs worker (profession, averageRating, ratingCount, profileImageUrl)
+  /// sont maintenant portés par UserModel — aucun second appel nécessaire.
   Future<void> _loadProfileData() async {
     try {
       final authService      = _ref.read(authServiceProvider);
@@ -126,73 +149,52 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
         return;
       }
 
-      final prefs            = await SharedPreferences.getInstance();
-      final savedAccountRole = prefs.getString(PrefKeys.accountRole);
+      // Une seule requête — le document unifié porte le rôle et tous les champs.
+      final userDoc = await firestoreService.getUser(uid);
 
-      // Fast path: accountRole already cached.
-      if (savedAccountRole == UserType.worker) {
+      if (!mounted) return;
+
+      if (userDoc == null) {
+        // Profil pas encore créé (edge case : première connexion, latence réseau).
+        // Fallback sur les données Firebase Auth.
         final firebaseUser = authService.user;
         state = state.copyWith(
           status:          SettingsStatus.idle,
           userName:        firebaseUser?.displayName ?? '',
-          activeRole:      UserRole.worker,
-          isWorkerAccount: true,
+          activeRole:      UserRole.client,
+          isWorkerAccount: false,
         );
-
-        final worker = await firestoreService.getWorker(uid);
-        if (worker != null && mounted) {
-          state = state.copyWith(
-            userName:            worker.name,
-            professionLabel:     worker.profession,
-            profileImageUrl:     worker.profileImageUrl,
-            workerAverageRating: worker.averageRating,
-            workerRatingCount:   worker.ratingCount,
-          );
-        }
-        AppLogger.info('Settings loaded: worker (cached)');
+        AppLogger.warning('Settings: userDoc null for uid=$uid — fallback to Firebase');
         return;
       }
 
-      // Slow path: check Firestore.
-      final worker = await firestoreService.getWorker(uid);
-      if (worker != null) {
+      if (userDoc.isWorker) {
+        // Mettre à jour le cache SharedPreferences pour cohérence.
+        final prefs = await SharedPreferences.getInstance();
         await prefs.setString(PrefKeys.accountRole, UserType.worker);
-        if (mounted) {
-          state = state.copyWith(
-            status:              SettingsStatus.idle,
-            userName:            worker.name,
-            professionLabel:     worker.profession,
-            profileImageUrl:     worker.profileImageUrl,
-            activeRole:          UserRole.worker,
-            isWorkerAccount:     true,
-            workerAverageRating: worker.averageRating,
-            workerRatingCount:   worker.ratingCount,
-          );
-        }
-        AppLogger.info('Settings loaded: worker (Firestore)');
-        return;
-      }
 
-      final user = await firestoreService.getUser(uid);
-      if (user != null && mounted) {
+        if (!mounted) return;
+        state = state.copyWith(
+          status:              SettingsStatus.idle,
+          userName:            userDoc.name,
+          professionLabel:     userDoc.profession,       // String? — correct
+          profileImageUrl:     userDoc.profileImageUrl,
+          activeRole:          UserRole.worker,
+          isWorkerAccount:     true,
+          workerAverageRating: userDoc.averageRating,
+          workerRatingCount:   userDoc.ratingCount,
+        );
+        AppLogger.info('Settings loaded: worker uid=$uid');
+      } else {
+        if (!mounted) return;
         state = state.copyWith(
           status:          SettingsStatus.idle,
-          userName:        user.name,
+          userName:        userDoc.name,
+          profileImageUrl: userDoc.profileImageUrl,
           activeRole:      UserRole.client,
           isWorkerAccount: false,
         );
-        AppLogger.info('Settings loaded: client');
-        return;
-      }
-
-      final firebaseUser = authService.user;
-      if (mounted) {
-        state = state.copyWith(
-          status:          SettingsStatus.idle,
-          userName:        firebaseUser?.displayName ?? '',
-          activeRole:      UserRole.client,
-          isWorkerAccount: false,
-        );
+        AppLogger.info('Settings loaded: client uid=$uid');
       }
     } catch (e, st) {
       AppLogger.error('SettingsNotifier._loadProfileData', e, st);
@@ -213,18 +215,11 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
   /// FIX (Settings Audit P1): replaced FirebaseAnalytics.instance.logEvent()
   ///   with ref.read(analyticsServiceProvider).logUserSignedOut().
   /// FIX [L1]: prefs.remove(PrefKeys.accountRole) moved AFTER
-  ///   authService.signOut() succeeds. Previously it was before signOut, so
-  ///   any exception from signOut left the pref wiped while the user was still
-  ///   authenticated — causing a client-role fallback on the next cold launch
-  ///   even for authenticated workers. Now the pref is only removed once
-  ///   sign-out is confirmed; on failure it is left intact and the role is
-  ///   restored in the catch block.
+  ///   authService.signOut() succeeds.
   Future<void> signOut() async {
     if (!mounted) return;
-    // Guard: use compat getter — reads status == SettingsStatus.signingOut
     if (state.isSigningOut) return;
 
-    // FIX (P2): single status field replaces the former isSigningOut bool.
     state = state.copyWith(status: SettingsStatus.signingOut);
 
     final cachedRoleNotifier = _ref.read(cachedUserRoleProvider.notifier);
@@ -251,18 +246,12 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
         }
       }
 
-      // FIX [L1]: authService.signOut() is called BEFORE prefs.remove so
-      // that if signOut throws (e.g. network error), prefs remain intact and
-      // the user can retry without losing their locally-cached role.
       await authService.signOut();
 
-      // Pref removed only after confirmed sign-out success.
       try {
         final prefs = await SharedPreferences.getInstance();
         await prefs.remove(PrefKeys.accountRole);
       } catch (prefsError) {
-        // Non-fatal — the auth session is already ended; stale pref is
-        // harmless and will be overwritten on the next successful sign-in.
         AppLogger.warning('signOut: prefs.remove failed — $prefsError');
       }
 
@@ -273,7 +262,6 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
         cachedRoleNotifier.state = state.isWorkerAccount
             ? UserRole.worker
             : UserRole.client;
-        // FIX (P2): restore idle + error (no separate isSigningOut: false needed)
         state = state.copyWith(
           status:       SettingsStatus.error,
           errorMessage: 'errors.signout_failed',
@@ -283,21 +271,10 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
   }
 
   /// Permanently deletes the Firebase Auth account and wipes local state.
-  ///
-  /// FIX (P2): status: SettingsStatus.deletingAccount replaces isDeletingAccount: true.
-  /// FIX (Settings Audit P1): replaced FirebaseAnalytics.instance.logEvent()
-  ///   with ref.read(analyticsServiceProvider).logUserDeletedAccount().
-  /// FIX [AUTO]: FCM tokens cleared before Auth deletion (best-effort).
-  /// FIX [AUTO]: prefs cleared AFTER confirmed deletion so requires-recent-login
-  ///   errors leave the account accessible with prefs intact.
-  /// FIX [AUTO]: prefs.clear() replaced with targeted key removal — only
-  ///   auth/account keys are wiped; unrelated prefs (theme, locale, etc.) survive.
   Future<String?> deleteAccount() async {
     if (!mounted) return null;
-    // Guard: use compat getter — reads status == SettingsStatus.deletingAccount
     if (state.isDeletingAccount) return null;
 
-    // FIX (P2): single status field replaces the former isDeletingAccount bool.
     state = state.copyWith(status: SettingsStatus.deletingAccount);
 
     final cachedRoleNotifier = _ref.read(cachedUserRoleProvider.notifier);
@@ -312,9 +289,6 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
     try {
       cachedRoleNotifier.state = UserRole.unknown;
 
-      // FIX [AUTO]: clear FCM tokens from Firestore before deleting the Auth
-      // account. This is best-effort — a failure here does not abort deletion,
-      // but Cloud Function cleanup (idempotent) is the authoritative backstop.
       if (uid != null) {
         try {
           await firestoreService.updateUserFcmToken(uid, '');
@@ -329,16 +303,12 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
         }
       }
 
-      // FIX [AUTO]: attempt deletion BEFORE clearing prefs. If Auth requires
-      // re-authentication (requires-recent-login), the error is returned here
-      // and prefs remain intact so the user stays logged in and can retry.
       final errorKey = await authService.deleteAccount();
       if (errorKey != null) {
         if (mounted) {
           cachedRoleNotifier.state = state.isWorkerAccount
               ? UserRole.worker
               : UserRole.client;
-          // FIX (P2): restore idle + error (no separate isDeletingAccount: false needed)
           state = state.copyWith(
             status:       SettingsStatus.error,
             errorMessage: errorKey,
@@ -347,16 +317,11 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
         return errorKey;
       }
 
-      // Deletion confirmed — now safe to remove auth-related local data.
-      // FIX [AUTO]: targeted removal instead of prefs.clear() so unrelated
-      // preferences are not destroyed (theme, locale, notification settings…).
       try {
         final prefs = await SharedPreferences.getInstance();
         await prefs.remove(PrefKeys.accountRole);
-        // Extend this list with any other auth-scoped pref keys as they are added.
         AppLogger.info('SettingsNotifier.deleteAccount: local auth prefs cleared');
       } catch (prefsError) {
-        // Non-fatal — account is already deleted; local cleanup is best-effort.
         AppLogger.warning(
             'SettingsNotifier.deleteAccount: prefs cleanup failed — $prefsError');
       }

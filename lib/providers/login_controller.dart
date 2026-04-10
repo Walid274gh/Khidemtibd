@@ -214,16 +214,29 @@ class LoginController extends StateNotifier<LoginState> {
   // ROLE RESOLUTION
   // ==========================================================================
 
+  /// FIX (MIGRATION — collection unifiée) :
+  /// Remplace getWorker(uid) par getUser(uid) + check isWorker.
+  ///
+  /// AVANT : GET /workers/:uid pour savoir si l'utilisateur est un worker.
+  ///         Retournait null pour les clients. Requête inutile depuis la
+  ///         fusion : la collection workers n'existe plus.
+  ///
+  /// APRÈS : GET /users/:uid — une seule requête. Le champ `role` du document
+  ///         unifié discrimine 'client' vs 'worker'.
+  ///         userDoc.isWorker == true  →  UserRole.worker
+  ///         userDoc.isWorker == false →  UserRole.client
   Future<void> _resolveAndPersistRole(String uid) async {
     try {
       final firestoreService = _ref.read(firestoreServiceProvider);
-      final worker = await firestoreService
-          .getWorker(uid)
+
+      // Une seule requête HTTP au lieu de deux.
+      final userDoc = await firestoreService
+          .getUser(uid)
           .timeout(const Duration(seconds: 10), onTimeout: () => null);
 
-      final role  = worker != null ? UserRole.worker : UserRole.client;
-      final prefs = await SharedPreferences.getInstance();
+      final role = userDoc?.isWorker == true ? UserRole.worker : UserRole.client;
 
+      final prefs = await SharedPreferences.getInstance();
       await prefs.setString(
         PrefKeys.accountRole,
         role == UserRole.worker ? UserType.worker : UserType.user,
