@@ -1,13 +1,13 @@
 import { Module } from '@nestjs/common';
-import { AuthModule } from '../auth/auth.module';
-import { WorkersModule } from '../workers/workers.module';
-import { ServiceRequestsService } from './service-requests.service';
+import { AuthModule }                from '../auth/auth.module';
+import { UsersModule }               from '../users/users.module';
+import { ServiceRequestsService }    from './service-requests.service';
 import { ServiceRequestsController } from './service-requests.controller';
 
 @Module({
-  imports: [AuthModule, WorkersModule],
+  imports: [AuthModule, UsersModule],   // ← UsersModule replaces WorkersModule
   controllers: [ServiceRequestsController],
-  providers: [ServiceRequestsService],
-  exports: [ServiceRequestsService],
+  providers:   [ServiceRequestsService],
+  exports:     [ServiceRequestsService],
 })
 export class ServiceRequestsModule {}
