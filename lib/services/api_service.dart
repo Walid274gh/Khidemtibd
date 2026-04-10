@@ -1,22 +1,24 @@
 // lib/services/api_service.dart
 //
-// FIX (Registration P0): createOrUpdateUser / createOrUpdateWorker now build
-// the HTTP payload field-by-field instead of spreading user.toMap().
+// MIGRATION — COLLECTION UNIFIÉE
+// ────────────────────────────────────────────────────────────────────────────
+// Changements post-migration par rapport à la version précédente :
 //
-// ROOT CAUSE: NestJS ValidationPipe is configured with
-//   { whitelist: true, forbidNonWhitelisted: true }
-// which means ANY field not declared in CreateUserDto / CreateWorkerDto
-// (e.g. lastUpdated, cellId, wilayaCode, geoHash coming from toMap())
-// causes a 400 Bad Request. This silently killed every new registration:
-//   1. Firebase user created ✓
-//   2. POST /users → 400 (extra fields) → ApiServiceException thrown
-//   3. catch block in signUp() → _cleanupFailedSignUp() → Firebase user deleted
-//   4. User sees "can't create account"
+//   createOrUpdateWorker() :
+//     • Ajout de `'role': 'worker'` dans le payload HTTP.
+//       Le serveur NestJS l'enforce de toute façon via CreateWorkerDto, mais
+//       l'envoyer explicitement rend l'intention lisible et évite toute
+//       ambiguïté si le DTO évolue.
+//     • `worker.profession` est maintenant `String?` (UserModel) au lieu de
+//       `String` (ancienne WorkerModel). Guard ajouté pour éviter d'envoyer
+//       null à un champ @IsNotEmpty() côté serveur.
 //
-// FIX: explicit whitelisted payload — only fields present in CreateUserDto /
-// CreateWorkerDto. No toMap() spreading anywhere in write paths.
+//   Types : WorkerModel = UserModel via typedef — aucun changement de code
+//   requis ailleurs. Les caches restent ApiCache<WorkerModel> = ApiCache<UserModel>.
 //
-// STEP 5 MIGRATION: Replaces FirestoreService + all Firestore repositories.
+// FIX (Registration P0) : createOrUpdateUser / createOrUpdateWorker envoient
+// des payloads champ-par-champ plutôt que user.toMap() pour éviter les 400
+// causés par forbidNonWhitelisted=true dans ValidationPipe NestJS.
 
 import 'dart:async';
 import 'dart:convert';
@@ -58,19 +60,21 @@ class ApiServiceException implements Exception {
 // ─────────────────────────────────────────────────────────────────────────────
 
 class ApiService {
-  final String         _baseUrl;
+  final String          _baseUrl;
   final RealtimeService _realtime;
-  final http.Client    _http;
+  final http.Client     _http;
 
-  final ApiCache<UserModel>                       _userCache;
-  final ApiCache<WorkerModel>                     _workerCache;
-  final ApiCache<ServiceRequestEnhancedModel>     _requestCache;
+  // WorkerModel = UserModel via typedef — les caches sont typiquement distincts
+  // pour isoler les TTL et les évictions, même si le type sous-jacent est identique.
+  final ApiCache<UserModel>                   _userCache;
+  final ApiCache<WorkerModel>                 _workerCache;
+  final ApiCache<ServiceRequestEnhancedModel> _requestCache;
 
   static const Duration _operationTimeout = Duration(seconds: 10);
   static const Duration _cacheTTL         = Duration(minutes: 15);
   static const int      _cacheMaxSize     = 100;
 
-  bool _isDisposed = false;
+  bool  _isDisposed = false;
   Timer? _cacheCleanupTimer;
 
   static const String usersCollection           = 'users';
@@ -81,9 +85,9 @@ class ApiService {
   static const String cellsCollection           = 'geographic_cells';
 
   ApiService({
-    required String        baseUrl,
+    required String         baseUrl,
     required RealtimeService realtime,
-    http.Client?           httpClient,
+    http.Client?            httpClient,
   })  : _baseUrl  = baseUrl.endsWith('/') ? baseUrl.substring(0, baseUrl.length - 1) : baseUrl,
         _realtime = realtime,
         _http     = httpClient ?? http.Client(),
@@ -104,20 +108,12 @@ class ApiService {
     };
   }
 
-  Future<Map<String, String>> _authHeadersNoContentType() async {
-    final user  = FirebaseAuth.instance.currentUser;
-    final token = await user?.getIdToken();
-    return {
-      if (token != null) 'Authorization': 'Bearer $token',
-    };
-  }
-
   // ── HTTP helpers ───────────────────────────────────────────────────────────
 
   Future<dynamic> _get(String path) async {
     _ensureNotDisposed();
-    final headers  = await _authHeaders();
-    final uri      = Uri.parse('$_baseUrl$path');
+    final headers = await _authHeaders();
+    final uri     = Uri.parse('$_baseUrl$path');
     try {
       final response = await _http.get(uri, headers: headers)
           .timeout(_operationTimeout);
@@ -131,10 +127,11 @@ class ApiService {
 
   Future<dynamic> _post(String path, Map<String, dynamic> body) async {
     _ensureNotDisposed();
-    final headers  = await _authHeaders();
-    final uri      = Uri.parse('$_baseUrl$path');
+    final headers = await _authHeaders();
+    final uri     = Uri.parse('$_baseUrl$path');
     try {
-      final response = await _http.post(uri, headers: headers, body: jsonEncode(body))
+      final response = await _http
+          .post(uri, headers: headers, body: jsonEncode(body))
           .timeout(_operationTimeout);
       return _handleResponse(response);
     } on ApiServiceException {
@@ -146,10 +143,11 @@ class ApiService {
 
   Future<dynamic> _patch(String path, Map<String, dynamic> body) async {
     _ensureNotDisposed();
-    final headers  = await _authHeaders();
-    final uri      = Uri.parse('$_baseUrl$path');
+    final headers = await _authHeaders();
+    final uri     = Uri.parse('$_baseUrl$path');
     try {
-      final response = await _http.patch(uri, headers: headers, body: jsonEncode(body))
+      final response = await _http
+          .patch(uri, headers: headers, body: jsonEncode(body))
           .timeout(_operationTimeout);
       return _handleResponse(response);
     } on ApiServiceException {
@@ -184,7 +182,7 @@ class ApiService {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // USER METHODS
+  // MÉTHODES USER
   // ═══════════════════════════════════════════════════════════════════════════
 
   Future<UserModel?> getUser(String userId) async {
@@ -206,23 +204,21 @@ class ApiService {
 
   Future<void> setUser(UserModel user) => createOrUpdateUser(user);
 
-  /// FIX: explicit whitelisted payload matching CreateUserDto exactly.
-  /// No toMap() spreading — avoids 400 from forbidNonWhitelisted.
+  /// Payload explicitement limité aux champs déclarés dans CreateUserDto NestJS.
+  /// forbidNonWhitelisted=true rejette tout champ supplémentaire avec 400.
   Future<void> createOrUpdateUser(UserModel user) async {
     _ensureNotDisposed();
 
-    // Build payload with ONLY fields declared in NestJS CreateUserDto.
-    // forbidNonWhitelisted=true will 400 any extra key (lastUpdated, cellId, etc.)
     final payload = <String, dynamic>{
       'id':    user.id,
       'name':  user.name,
       'email': user.email,
     };
-    if (user.phoneNumber?.isNotEmpty == true) payload['phoneNumber']     = user.phoneNumber;
-    if (user.latitude        != null)         payload['latitude']        = user.latitude;
-    if (user.longitude       != null)         payload['longitude']       = user.longitude;
-    if (user.profileImageUrl != null)         payload['profileImageUrl'] = user.profileImageUrl;
-    if (user.fcmToken        != null)         payload['fcmToken']        = user.fcmToken;
+    if (user.phoneNumber.isNotEmpty)  payload['phoneNumber']     = user.phoneNumber;
+    if (user.latitude != null)        payload['latitude']        = user.latitude;
+    if (user.longitude != null)       payload['longitude']       = user.longitude;
+    if (user.profileImageUrl != null) payload['profileImageUrl'] = user.profileImageUrl;
+    if (user.fcmToken != null)        payload['fcmToken']        = user.fcmToken;
 
     final data = await _post('/users', payload);
     if (data != null) {
@@ -237,7 +233,7 @@ class ApiService {
   }) async {
     _ensureNotDisposed();
     await _patch('/users/$userId/location', {
-      'latitude': lat,
+      'latitude':  lat,
       'longitude': lng,
       if (cellId     != null) 'cellId':     cellId,
       if (wilayaCode != null) 'wilayaCode': wilayaCode,
@@ -254,8 +250,9 @@ class ApiService {
       updateFcmToken(userId, token);
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // WORKER METHODS
+  // MÉTHODES WORKER
   // ═══════════════════════════════════════════════════════════════════════════
+  // WorkerModel = UserModel via typedef — le serveur filtre avec role='worker'.
 
   Future<WorkerModel?> getWorker(String workerId) async {
     _ensureNotDisposed();
@@ -265,6 +262,7 @@ class ApiService {
     try {
       final data = await _get('/workers/$workerId');
       if (data == null) return null;
+      // WorkerModel.fromJson = UserModel.fromJson via typedef
       final worker = WorkerModel.fromJson(data as Map<String, dynamic>);
       _workerCache.set(workerId, worker);
       return worker;
@@ -276,24 +274,31 @@ class ApiService {
 
   Future<void> setWorker(WorkerModel worker) => createOrUpdateWorker(worker);
 
-  /// FIX: explicit whitelisted payload matching CreateWorkerDto exactly.
-  /// No toMap() spreading — avoids 400 from forbidNonWhitelisted.
+  /// Payload explicitement limité aux champs déclarés dans CreateWorkerDto NestJS.
+  ///
+  /// MIGRATION :
+  ///   • `role: 'worker'` ajouté — le serveur l'enforce, mais l'envoyer
+  ///     explicitement garantit la cohérence si le DTO évolue.
+  ///   • `profession` est maintenant String? (UserModel). Guard isNotEmpty
+  ///     ajouté pour ne pas envoyer null à un champ @IsNotEmpty() serveur.
   Future<void> createOrUpdateWorker(WorkerModel worker) async {
     _ensureNotDisposed();
 
-    // Build payload with ONLY fields declared in NestJS CreateWorkerDto.
     final payload = <String, dynamic>{
-      'id':         worker.id,
-      'name':       worker.name,
-      'email':      worker.email,
-      'profession': worker.profession,
-      'isOnline':   worker.isOnline,
+      'id':    worker.id,
+      'name':  worker.name,
+      'email': worker.email,
+      'role':  'worker',            // ← MIGRATION : explicite
+      // profession peut être null pour UserModel ; guard obligatoire
+      if (worker.profession?.isNotEmpty == true)
+        'profession': worker.profession,
+      'isOnline': worker.isOnline,
     };
-    if (worker.phoneNumber?.isNotEmpty == true) payload['phoneNumber']     = worker.phoneNumber;
-    if (worker.latitude        != null)         payload['latitude']        = worker.latitude;
-    if (worker.longitude       != null)         payload['longitude']       = worker.longitude;
-    if (worker.profileImageUrl != null)         payload['profileImageUrl'] = worker.profileImageUrl;
-    if (worker.fcmToken        != null)         payload['fcmToken']        = worker.fcmToken;
+    if (worker.phoneNumber.isNotEmpty)  payload['phoneNumber']     = worker.phoneNumber;
+    if (worker.latitude != null)        payload['latitude']        = worker.latitude;
+    if (worker.longitude != null)       payload['longitude']       = worker.longitude;
+    if (worker.profileImageUrl != null) payload['profileImageUrl'] = worker.profileImageUrl;
+    if (worker.fcmToken != null)        payload['fcmToken']        = worker.fcmToken;
 
     final data = await _post('/workers', payload);
     if (data != null) {
@@ -339,7 +344,9 @@ class ApiService {
     if (onlineOnly)           q.write('&onlineOnly=true');
     final data = await _get(q.toString());
     if (data == null) return [];
-    return (data as List).map((e) => WorkerModel.fromJson(e as Map<String, dynamic>)).toList();
+    return (data as List)
+        .map((e) => WorkerModel.fromJson(e as Map<String, dynamic>))
+        .toList();
   }
 
   Future<List<WorkerModel>> getWorkersInWilaya({
@@ -351,7 +358,9 @@ class ApiService {
     if (onlineOnly)           q.write('&isOnline=true');
     final data = await _get(q.toString());
     if (data == null) return [];
-    return (data as List).map((e) => WorkerModel.fromJson(e as Map<String, dynamic>)).toList();
+    return (data as List)
+        .map((e) => WorkerModel.fromJson(e as Map<String, dynamic>))
+        .toList();
   }
 
   Stream<WorkerModel?> streamWorker(String workerId) =>
@@ -364,7 +373,7 @@ class ApiService {
       _realtime.streamOnlineWorkersUnscoped(limit: limit);
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // SERVICE REQUEST METHODS
+  // MÉTHODES SERVICE REQUEST
   // ═══════════════════════════════════════════════════════════════════════════
 
   Future<void> createServiceRequest(ServiceRequestEnhancedModel request) async {
@@ -384,11 +393,11 @@ class ApiService {
       'userLongitude':   request.userLongitude,
       'userAddress':     request.userAddress,
       'mediaUrls':       request.mediaUrls,
-      if (request.budgetMin   != null) 'budgetMin':   request.budgetMin,
-      if (request.budgetMax   != null) 'budgetMax':   request.budgetMax,
-      if (request.cellId      != null) 'cellId':      request.cellId,
-      if (request.wilayaCode  != null) 'wilayaCode':  request.wilayaCode,
-      if (request.geoHash     != null) 'geoHash':     request.geoHash,
+      if (request.budgetMin  != null) 'budgetMin':  request.budgetMin,
+      if (request.budgetMax  != null) 'budgetMax':  request.budgetMax,
+      if (request.cellId     != null) 'cellId':     request.cellId,
+      if (request.wilayaCode != null) 'wilayaCode': request.wilayaCode,
+      if (request.geoHash    != null) 'geoHash':    request.geoHash,
     });
     if (data != null) {
       final created = ServiceRequestEnhancedModel.fromJson(data as Map<String, dynamic>);
@@ -450,8 +459,6 @@ class ApiService {
     });
   }
 
-  // ── Streams ────────────────────────────────────────────────────────────────
-
   Stream<ServiceRequestEnhancedModel?> streamServiceRequest(String requestId) =>
       _realtime.streamServiceRequest(requestId);
 
@@ -511,7 +518,7 @@ class ApiService {
 
   Future<void> saveCell(GeographicCell cell) async {
     _ensureNotDisposed();
-    _logInfo('saveCell: no-op (server-side only in new stack)');
+    _logInfo('saveCell: no-op (server-side only)');
   }
 
   Future<GeographicCell?> getCell(String cellId) async {
@@ -525,12 +532,12 @@ class ApiService {
       final parts = cellId.split('_');
       if (parts.length != 3) return null;
       return GeographicCell(
-        id:               cellId,
-        wilayaCode:       int.tryParse(parts[0]) ?? 0,
-        centerLat:        double.tryParse(parts[1]) ?? 0,
-        centerLng:        double.tryParse(parts[2]) ?? 0,
-        radius:           5.0,
-        adjacentCellIds:  adjacentIds,
+        id:              cellId,
+        wilayaCode:      int.tryParse(parts[0]) ?? 0,
+        centerLat:       double.tryParse(parts[1]) ?? 0,
+        centerLng:       double.tryParse(parts[2]) ?? 0,
+        radius:          5.0,
+        adjacentCellIds: adjacentIds,
       );
     } on ApiServiceException catch (e) {
       if (e.code == 'NOT_FOUND') return null;
@@ -540,19 +547,15 @@ class ApiService {
 
   Future<List<GeographicCell>> getCellsInWilaya(int wilayaCode) async => [];
 
-  // ── Atomic profile creation ────────────────────────────────────────────────
+  // ── Création atomique de profil ────────────────────────────────────────────
 
   Future<void> atomicCreateUserProfile({UserModel? user, WorkerModel? worker}) async {
     _ensureNotDisposed();
-    if (worker != null) {
-      await createOrUpdateWorker(worker);
-    }
-    if (user != null) {
-      await createOrUpdateUser(user);
-    }
+    if (worker != null) await createOrUpdateWorker(worker);
+    if (user   != null) await createOrUpdateUser(user);
   }
 
-  // ── Cache management ───────────────────────────────────────────────────────
+  // ── Gestion du cache ───────────────────────────────────────────────────────
 
   void startCacheCleanup() {
     _cacheCleanupTimer?.cancel();
@@ -563,8 +566,9 @@ class ApiService {
     });
   }
 
-  void cacheUser(String userId, UserModel user)    => _userCache.set(userId, user);
-  void cacheWorker(String workerId, WorkerModel w) => _workerCache.set(workerId, w);
+  void cacheUser(String userId, UserModel user)      => _userCache.set(userId, user);
+  void cacheWorker(String workerId, WorkerModel w)   => _workerCache.set(workerId, w);
+
   void cleanExpiredCache() {
     _userCache.cleanExpired();
     _workerCache.cleanExpired();
@@ -587,7 +591,10 @@ class ApiService {
   }
 
   void _ensureNotDisposed() {
-    if (_isDisposed) throw const ApiServiceException('ApiService has been disposed', code: 'SERVICE_DISPOSED');
+    if (_isDisposed) {
+      throw const ApiServiceException(
+          'ApiService has been disposed', code: 'SERVICE_DISPOSED');
+    }
   }
 
   void _logInfo(String m) {
@@ -596,7 +603,7 @@ class ApiService {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// _ApiDirectClient shim (unchanged)
+// _ApiDirectClient shim — rétrocompatibilité pour les call sites existants
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _ApiDirectClient {
@@ -642,7 +649,9 @@ class _DocRef {
   }
 
   Future<void> delete() async {
-    if (kDebugMode) debugPrint('[ApiDirectClient] delete not fully implemented for $_collection/$_id');
+    if (kDebugMode) {
+      debugPrint('[ApiDirectClient] delete not fully implemented for $_collection/$_id');
+    }
   }
 }
 
@@ -676,17 +685,17 @@ class _QueryRef {
 
   Future<_QuerySnapshot> get() async {
     final q = StringBuffer('/$_collection?');
-    if (_isEqualTo != null) q.write('$_field=${Uri.encodeComponent(_isEqualTo.toString())}&');
+    if (_isEqualTo != null) {
+      q.write('$_field=${Uri.encodeComponent(_isEqualTo.toString())}&');
+    }
     q.write('limit=50');
     final data = await _api._get(q.toString());
     if (data == null) return _QuerySnapshot([]);
-    final docs = (data as List)
-        .map((e) {
-          final m = e as Map<String, dynamic>;
-          final id = (m['_id'] ?? m['id'] ?? '') as String;
-          return _DocSnapshot(id: id, data: m, exists: true);
-        })
-        .toList();
+    final docs = (data as List).map((e) {
+      final m  = e as Map<String, dynamic>;
+      final id = (m['_id'] ?? m['id'] ?? '') as String;
+      return _DocSnapshot(id: id, data: m, exists: true);
+    }).toList();
     return _QuerySnapshot(docs);
   }
 }

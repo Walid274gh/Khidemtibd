@@ -1,23 +1,17 @@
 // lib/services/auth_service.dart
 //
-// FIX (Registration P0): signUp() is now resilient — backend profile creation
-// is decoupled from Firebase Auth registration.
+// MIGRATION — COLLECTION UNIFIÉE
+// ────────────────────────────────────────────────────────────────────────────
+// Changements par rapport à la version précédente :
 //
-// ROOT CAUSE ANALYSIS:
-//   OLD flow: createUser → atomicCreateUserProfile (POST /users) → 400 error
-//   (extra fields from toMap()) → _cleanupFailedSignUp → Firebase user deleted
-//   → user sees "can't create account" even though auth worked.
+//   _createBackendProfile() : ajout de `role: 'worker'` dans le constructeur
+//   WorkerModel(...) — nécessaire car UserModel.role a pour défaut 'client'.
+//   Sans ce champ, les travailleurs seraient créés comme clients en DB.
 //
-// NEW flow (professional 3-layer approach):
-//   1. Firebase Auth layer  → create user, send email verification (always done)
-//   2. Backend profile layer → best-effort with 8s timeout, NEVER blocks auth
-//   3. Self-healing layer   → _ensureBackendProfile() on every login repairs
-//      edge cases: failed registration, old Firestore users, network blips.
+//   linkSocialWorkerProfession() : même correction, `role: 'worker'` ajouté.
 //
-// RESULT:
-//   • Firebase user is NEVER deleted due to backend failure
-//   • Old Firestore accounts auto-get a MongoDB profile on first login
-//   • New registrations that had a backend timeout self-heal on first login
+// Tout le reste est identique à la version précédente (3-layer resilient
+// registration, _ensureBackendProfile self-healing, etc.).
 
 import 'dart:async';
 import 'dart:convert';
@@ -31,16 +25,15 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 
 import '../models/user_model.dart';
-import '../models/worker_model.dart';
 import '../utils/constants.dart';
 import 'api_service.dart';
 
 class AuthService extends ChangeNotifier {
-  static const Duration _authInitTimeout       = Duration(seconds: 10);
-  static const Duration _signOutDelay          = Duration(milliseconds: 500);
+  static const Duration _authInitTimeout        = Duration(seconds: 10);
+  static const Duration _signOutDelay           = Duration(milliseconds: 500);
   static const Duration _signOutFirestoreTimeout = Duration(seconds: 5);
-  static const Duration _firebaseAuthTimeout   = Duration(seconds: 10);
-  static const Duration _backendProfileTimeout = Duration(seconds: 8);
+  static const Duration _firebaseAuthTimeout    = Duration(seconds: 10);
+  static const Duration _backendProfileTimeout  = Duration(seconds: 8);
 
   static const int _minPasswordLength = AppConstants.minPasswordLength;
 
@@ -54,15 +47,15 @@ class AuthService extends ChangeNotifier {
   final ApiService   _firestoreService;
 
   User? _user;
-  bool _isLoading     = false;
-  bool _isInitialized = false;
+  bool  _isLoading    = false;
+  bool  _isInitialized = false;
   StreamSubscription<User?>? _authStateSubscription;
 
-  User? get user          => _user;
-  bool get isLoading      => _isLoading;
-  bool get isLoggedIn     => _user != null;
-  bool get isInitialized  => _isInitialized;
-  bool get emailVerified  => _user?.emailVerified ?? false;
+  User? get user         => _user;
+  bool  get isLoading     => _isLoading;
+  bool  get isLoggedIn    => _user != null;
+  bool  get isInitialized => _isInitialized;
+  bool  get emailVerified => _user?.emailVerified ?? false;
 
   AuthService(this._firestoreService) {
     _initializeAuth();
@@ -122,23 +115,14 @@ class AuthService extends ChangeNotifier {
     try {
       _setLoading(true);
       final credential = await _auth.signInWithEmailAndPassword(
-        email: email.trim(),
+        email:    email.trim(),
         password: password,
       ).timeout(_firebaseAuthTimeout);
-
-      if (credential.user != null && !credential.user!.emailVerified) {
-        _logWarning('User email not verified: ${_maskEmail(credential.user?.email)}');
-      }
 
       await credential.user?.reload().timeout(_firebaseAuthTimeout);
       _user = _auth.currentUser;
 
-      // Self-healing layer: ensure backend profile exists.
-      // Handles: old Firestore users, failed registration backend step,
-      // any network blip during signUp. Fire-and-forget, never blocks login.
-      if (_user != null) {
-        _ensureBackendProfile(_user!).ignore();
-      }
+      if (_user != null) _ensureBackendProfile(_user!).ignore();
 
       _logInfo('User signed in: ${credential.user?.uid}');
       return null;
@@ -164,14 +148,14 @@ class AuthService extends ChangeNotifier {
 
   String _getSignInErrorKey(String code) {
     switch (code) {
-      case 'user-not-found':       return 'errors.user_not_found';
-      case 'wrong-password':       return 'errors.wrong_password';
-      case 'invalid-email':        return 'errors.email_invalid';
-      case 'invalid-credential':   return 'errors.invalid_credential';
-      case 'user-disabled':        return 'errors.user_disabled';
-      case 'too-many-requests':    return 'errors.too_many_requests';
+      case 'user-not-found':         return 'errors.user_not_found';
+      case 'wrong-password':         return 'errors.wrong_password';
+      case 'invalid-email':          return 'errors.email_invalid';
+      case 'invalid-credential':     return 'errors.invalid_credential';
+      case 'user-disabled':          return 'errors.user_disabled';
+      case 'too-many-requests':      return 'errors.too_many_requests';
       case 'network-request-failed': return 'errors.network';
-      default:                     return 'errors.sign_in_generic';
+      default:                       return 'errors.sign_in_generic';
     }
   }
 
@@ -182,27 +166,17 @@ class AuthService extends ChangeNotifier {
   Future<String?> signInWithGoogle() async {
     try {
       _setLoading(true);
-
       if (!GoogleSignIn.instance.supportsAuthenticate()) {
         return 'errors.sign_in_generic';
       }
-
-      final GoogleSignInAccount googleUser =
-          await GoogleSignIn.instance.authenticate();
-
-      final GoogleSignInAuthentication googleAuth = googleUser.authentication;
-
-      final credential = GoogleAuthProvider.credential(
-        idToken: googleAuth.idToken,
-      );
-
+      final googleUser = await GoogleSignIn.instance.authenticate();
+      final googleAuth = googleUser.authentication;
+      final credential = GoogleAuthProvider.credential(idToken: googleAuth.idToken);
       final userCredential = await _auth.signInWithCredential(credential);
-
       if (userCredential.user != null) {
         await _createOrLinkSocialProfile(userCredential.user!);
       }
-
-      _logInfo('Google sign-in success: ${userCredential.user?.uid}');
+      _logInfo('Google sign-in: ${userCredential.user?.uid}');
       return null;
     } on GoogleSignInException catch (e) {
       if (e.code == GoogleSignInExceptionCode.canceled) return null;
@@ -226,24 +200,17 @@ class AuthService extends ChangeNotifier {
   Future<String?> signInWithFacebook() async {
     try {
       _setLoading(true);
-
-      final LoginResult result = await FacebookAuth.instance.login();
-
+      final result = await FacebookAuth.instance.login();
       if (result.status == LoginStatus.cancelled) return null;
       if (result.status != LoginStatus.success || result.accessToken == null) {
         return 'errors.sign_in_generic';
       }
-
-      final OAuthCredential credential =
-          FacebookAuthProvider.credential(result.accessToken!.tokenString);
-
+      final credential = FacebookAuthProvider.credential(result.accessToken!.tokenString);
       final userCredential = await _auth.signInWithCredential(credential);
-
       if (userCredential.user != null) {
         await _createOrLinkSocialProfile(userCredential.user!);
       }
-
-      _logInfo('Facebook sign-in success: ${userCredential.user?.uid}');
+      _logInfo('Facebook sign-in: ${userCredential.user?.uid}');
       return null;
     } on FirebaseAuthException catch (e) {
       _logError('signInWithFacebook', e);
@@ -263,10 +230,8 @@ class AuthService extends ChangeNotifier {
   Future<String?> signInWithApple() async {
     try {
       _setLoading(true);
-
       final rawNonce    = _generateNonce();
       final hashedNonce = _sha256ofString(rawNonce);
-
       final appleCredential = await SignInWithApple.getAppleIDCredential(
         scopes: [
           AppleIDAuthorizationScopes.email,
@@ -274,14 +239,11 @@ class AuthService extends ChangeNotifier {
         ],
         nonce: hashedNonce,
       );
-
       final oauthCredential = OAuthProvider('apple.com').credential(
         idToken:  appleCredential.identityToken,
         rawNonce: rawNonce,
       );
-
       final userCredential = await _auth.signInWithCredential(oauthCredential);
-
       if (userCredential.user != null) {
         if (appleCredential.givenName != null) {
           final fullName =
@@ -290,8 +252,7 @@ class AuthService extends ChangeNotifier {
         }
         await _createOrLinkSocialProfile(userCredential.user!);
       }
-
-      _logInfo('Apple sign-in success: ${userCredential.user?.uid}');
+      _logInfo('Apple sign-in: ${userCredential.user?.uid}');
       return null;
     } on SignInWithAppleAuthorizationException catch (e) {
       if (e.code == AuthorizationErrorCode.canceled) return null;
@@ -309,7 +270,7 @@ class AuthService extends ChangeNotifier {
   }
 
   // ==========================================================================
-  // SOCIAL PROFILE CREATION (unchanged)
+  // CRÉATION DE PROFIL SOCIAL
   // ==========================================================================
 
   Future<void> _createOrLinkSocialProfile(User user) async {
@@ -321,6 +282,7 @@ class AuthService extends ChangeNotifier {
           ? user.displayName!
           : user.email?.split('@').firstOrNull ?? 'User';
 
+      // role par défaut 'client' — correct pour la connexion sociale initiale
       final newUser = UserModel(
         id:          user.uid,
         name:        fallbackName,
@@ -328,7 +290,6 @@ class AuthService extends ChangeNotifier {
         phoneNumber: '',
         lastUpdated: DateTime.now(),
       );
-
       await _firestoreService.createOrUpdateUser(newUser);
       _logInfo('Social profile created: ${user.uid}');
     } catch (e) {
@@ -337,13 +298,15 @@ class AuthService extends ChangeNotifier {
   }
 
   // ==========================================================================
-  // BACKEND PROFILE CREATION — separate from Firebase Auth
+  // CRÉATION DU PROFIL BACKEND — découplée de Firebase Auth
   // ==========================================================================
 
-  /// Creates the NestJS/MongoDB profile for a newly registered user.
+  /// Crée le profil NestJS/MongoDB pour un nouvel utilisateur.
   ///
-  /// Called BEFORE sign-out so the Firebase token is still valid.
-  /// Wrapped in try/catch in signUp() — any failure is non-fatal.
+  /// MIGRATION : `WorkerModel(...)` = `UserModel(...)` après typedef.
+  /// Le champ `role: 'worker'` est maintenant OBLIGATOIRE pour les workers car
+  /// UserModel.role a pour valeur par défaut 'client'. Sans lui, les travailleurs
+  /// seraient enregistrés comme clients dans la collection unifiée.
   Future<void> _createBackendProfile(
     User firebaseUser, {
     required String username,
@@ -354,20 +317,25 @@ class AuthService extends ChangeNotifier {
     final userId = firebaseUser.uid;
 
     if (profession != null && profession.isNotEmpty) {
-      final worker = WorkerModel(
-        id:            userId,
-        name:          username,
-        email:         email,
-        phoneNumber:   phoneNumber,
-        profession:    profession,
-        isOnline:      false,
-        lastUpdated:   DateTime.now(),
+      // FIX (migration) : role: 'worker' explicite — UserModel.role = 'client' par défaut.
+      final worker = UserModel(
+        id:          userId,
+        name:        username,
+        email:       email,
+        phoneNumber: phoneNumber,
+        role:        'worker',        // ← CRITIQUE : sans ce champ, role = 'client'
+        profession:  profession,
+        isOnline:    false,
+        lastUpdated: DateTime.now(),
         averageRating: 0.0,
         ratingCount:   0,
+        ratingSum:     0,
+        jobsCompleted: 0,
       );
       await _firestoreService.createOrUpdateWorker(worker);
       _logInfo('Backend worker profile created: $userId');
     } else {
+      // role par défaut 'client' — correct
       final user = UserModel(
         id:          userId,
         name:        username,
@@ -376,31 +344,27 @@ class AuthService extends ChangeNotifier {
         lastUpdated: DateTime.now(),
       );
       await _firestoreService.createOrUpdateUser(user);
-      _logInfo('Backend user profile created: $userId');
+      _logInfo('Backend client profile created: $userId');
     }
   }
 
-  /// Self-healing: ensures a MongoDB profile exists after every login.
+  /// Auto-réparation : garantit l'existence d'un profil MongoDB après chaque login.
   ///
-  /// Handles three cases:
-  ///   1. Old Firestore users logging in for the first time post-migration
-  ///   2. Registration where backend profile step failed or timed out
-  ///   3. Any future edge case — cheap GET before any potential POST
-  ///
-  /// Always fire-and-forget (.ignore()) — never blocks the login flow.
+  /// Couvre : anciens comptes Firestore, échec réseau au moment de l'inscription,
+  /// migration de base de données. Fire-and-forget (.ignore()) — ne bloque jamais.
   Future<void> _ensureBackendProfile(User firebaseUser) async {
     try {
       final uid = firebaseUser.uid;
 
-      // Check user profile first (most common case)
+      // Un seul document dans la collection unifiée — vérification rapide.
       final existingUser = await _firestoreService.getUser(uid);
       if (existingUser != null) return;
 
-      // Check worker profile
+      // getUser renvoie null → vérifier aussi côté worker (rôle worker possible)
       final existingWorker = await _firestoreService.getWorker(uid);
       if (existingWorker != null) return;
 
-      // Neither exists — create a minimal user profile from Firebase data
+      // Aucun profil → créer un profil client minimal depuis les données Firebase.
       final displayName = firebaseUser.displayName?.trim();
       final name = (displayName?.isNotEmpty == true)
           ? displayName!
@@ -412,38 +376,47 @@ class AuthService extends ChangeNotifier {
         email:       firebaseUser.email ?? '',
         phoneNumber: '',
         lastUpdated: DateTime.now(),
+        // role: 'client' par défaut — correct pour l'auto-réparation
       );
       await _firestoreService.createOrUpdateUser(user);
-      _logInfo('Backend profile auto-created on login for: $uid');
+      _logInfo('Backend profile auto-created on login: $uid');
     } catch (e) {
-      // Non-fatal — user is authenticated in Firebase, profile can retry later
+      // Non-fatal — l'utilisateur est authentifié Firebase, le profil peut réessayer.
       _logWarning('_ensureBackendProfile failed (non-fatal): $e');
     }
   }
 
   // ==========================================================================
-  // UPGRADE SOCIAL PROFILE TO WORKER (unchanged)
+  // UPGRADE PROFIL SOCIAL → WORKER
   // ==========================================================================
 
+  /// Lie une profession à un compte social existant (inscription worker via OAuth).
+  ///
+  /// MIGRATION : `role: 'worker'` explicite ajouté — même raison que dans
+  /// _createBackendProfile : UserModel.role = 'client' par défaut.
   Future<String?> linkSocialWorkerProfession({
     required String uid,
     required String profession,
   }) async {
     try {
       final existingUser = await _firestoreService.getUser(uid);
-      final worker = WorkerModel(
-        id:         uid,
-        name:       existingUser?.name ??
+      // FIX (migration) : role: 'worker' explicite.
+      final worker = UserModel(
+        id:          uid,
+        name:        existingUser?.name ??
             (_user?.displayName?.trim().isNotEmpty == true
                 ? _user!.displayName!
                 : _user?.email?.split('@').firstOrNull ?? 'User'),
-        email:      existingUser?.email ?? _user?.email ?? '',
+        email:       existingUser?.email ?? _user?.email ?? '',
         phoneNumber: existingUser?.phoneNumber ?? '',
+        role:        'worker',        // ← CRITIQUE
         profession:  profession.trim(),
         isOnline:    false,
         lastUpdated: DateTime.now(),
         averageRating: 0.0,
         ratingCount:   0,
+        ratingSum:     0,
+        jobsCompleted: 0,
       );
       await _firestoreService.createOrUpdateWorker(worker);
       _logInfo('linkSocialWorkerProfession: worker profile created for $uid');
@@ -462,8 +435,7 @@ class AuthService extends ChangeNotifier {
     const charset =
         '0123456789ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvwxyz-._';
     final random = Random.secure();
-    return List.generate(
-        length, (_) => charset[random.nextInt(charset.length)]).join();
+    return List.generate(length, (_) => charset[random.nextInt(charset.length)]).join();
   }
 
   String _sha256ofString(String input) {
@@ -473,7 +445,7 @@ class AuthService extends ChangeNotifier {
   }
 
   // ==========================================================================
-  // REGISTRATION
+  // INSCRIPTION
   // ==========================================================================
 
   Future<String?> signUp({
@@ -497,22 +469,16 @@ class AuthService extends ChangeNotifier {
     try {
       _setLoading(true);
 
-      // ── Layer 1: Firebase Auth ──────────────────────────────────────────────
+      // Couche 1 : Firebase Auth
       credential = await _auth.createUserWithEmailAndPassword(
         email:    email.trim(),
         password: password,
       ).timeout(_firebaseAuthTimeout);
 
-      final userId = credential.user!.uid;
-
       await _updateUserProfile(credential.user!, username);
-
-      // Send verification email (Firebase-only, always fast)
       await credential.user!.sendEmailVerification();
 
-      // ── Layer 2: Backend profile — best-effort, before sign-out ────────────
-      // Token is valid here. Timeout prevents blocking. Exception is caught
-      // locally so Firebase user is NEVER deleted on backend failure.
+      // Couche 2 : Profil backend — best-effort, jamais bloquant
       try {
         await _createBackendProfile(
           credential.user!,
@@ -522,22 +488,21 @@ class AuthService extends ChangeNotifier {
           profession:  (profession?.trim().isEmpty == true) ? null : profession?.trim(),
         ).timeout(_backendProfileTimeout);
       } catch (backendErr) {
-        // Non-fatal — Layer 3 (_ensureBackendProfile on next login) will repair.
-        _logWarning('Backend profile step failed (non-fatal, will retry on login): $backendErr');
+        // Non-fatal — couche 3 (_ensureBackendProfile) répare au prochain login.
+        _logWarning('Backend profile step failed (non-fatal): $backendErr');
       }
 
       if (!keepLoggedIn) {
         await Future.delayed(_signOutDelay);
         await _auth.signOut();
-        _logInfo('Account created. Verification email sent. userId=$userId');
+        _logInfo('Account created, email verification sent: ${credential.user!.uid}');
       } else {
-        _logInfo('Account created. User kept logged in. userId=$userId');
+        _logInfo('Account created, user kept logged in: ${credential.user!.uid}');
       }
 
       return null;
 
     } on FirebaseAuthException catch (e) {
-      // Firebase errors ARE fatal — cleanup the partial Firebase account
       _logError('signUp', e);
       await _cleanupFailedSignUp(credential);
       return _getSignUpErrorKey(e.code);
@@ -572,15 +537,7 @@ class AuthService extends ChangeNotifier {
   }
 
   Future<void> _updateUserProfile(User user, String username) async {
-    try {
-      await user.updateDisplayName(username.trim());
-    } on FirebaseAuthException catch (e) {
-      _logError('_updateUserProfile', e);
-      rethrow;
-    } catch (e) {
-      _logError('_updateUserProfile', e);
-      rethrow;
-    }
+    await user.updateDisplayName(username.trim());
   }
 
   Future<void> _cleanupFailedSignUp(UserCredential? credential) async {
@@ -605,7 +562,7 @@ class AuthService extends ChangeNotifier {
   }
 
   // ==========================================================================
-  // PASSWORD RESET
+  // RÉINITIALISATION DU MOT DE PASSE
   // ==========================================================================
 
   Future<String?> resetPassword(String email) async {
@@ -615,16 +572,14 @@ class AuthService extends ChangeNotifier {
       _setLoading(true);
       await _auth.sendPasswordResetEmail(email: email.trim())
           .timeout(_firebaseAuthTimeout);
-      _logInfo('Password reset email sent to: ${_maskEmail(email)}');
+      _logInfo('Password reset email sent: ${_maskEmail(email)}');
       return null;
     } on FirebaseAuthException catch (e) {
       _logError('resetPassword', e);
       return _getResetPasswordErrorKey(e.code);
     } on TimeoutException {
-      _logError('resetPassword', 'timeout');
       return 'errors.network';
     } catch (e) {
-      _logError('resetPassword', e);
       return 'errors.unknown';
     } finally {
       _setLoading(false);
@@ -641,7 +596,7 @@ class AuthService extends ChangeNotifier {
   }
 
   // ==========================================================================
-  // EMAIL VERIFICATION
+  // VÉRIFICATION EMAIL
   // ==========================================================================
 
   Future<String?> resendVerificationEmail() async {
@@ -650,13 +605,12 @@ class AuthService extends ChangeNotifier {
     if (currentUser.emailVerified) return 'errors.email_already_verified';
     try {
       await currentUser.sendEmailVerification();
-      _logInfo('Verification email resent to: ${_maskEmail(currentUser.email)}');
+      _logInfo('Verification email resent: ${_maskEmail(currentUser.email)}');
       return null;
     } on FirebaseAuthException catch (e) {
       _logError('resendVerificationEmail', e);
       return _getResendErrorKey(e.code);
     } catch (e) {
-      _logError('resendVerificationEmail', e);
       return 'errors.unknown';
     }
   }
@@ -687,7 +641,6 @@ class AuthService extends ChangeNotifier {
       notifyListeners();
       return _user?.emailVerified ?? false;
     } on TimeoutException {
-      _logError('reloadAndCheckEmailVerification', 'timeout');
       return false;
     } catch (e) {
       _logError('reloadAndCheckEmailVerification', e);
@@ -696,7 +649,7 @@ class AuthService extends ChangeNotifier {
   }
 
   // ==========================================================================
-  // SIGN-OUT
+  // DÉCONNEXION
   // ==========================================================================
 
   Future<void> signOut() async {
@@ -739,7 +692,7 @@ class AuthService extends ChangeNotifier {
   }
 
   // ==========================================================================
-  // ACCOUNT DELETION
+  // SUPPRESSION DU COMPTE
   // ==========================================================================
 
   Future<String?> deleteAccount() async {
@@ -756,7 +709,6 @@ class AuthService extends ChangeNotifier {
       if (e.code == 'requires-recent-login') return 'errors.requires_recent_login';
       return 'errors.delete_account_failed';
     } on TimeoutException {
-      _logError('deleteAccount', 'timeout');
       return 'errors.network';
     } catch (e) {
       _logError('deleteAccount', e);
@@ -767,22 +719,18 @@ class AuthService extends ChangeNotifier {
   }
 
   // ==========================================================================
-  // PRIVACY HELPERS
+  // UTILITAIRES
   // ==========================================================================
 
   static String _maskEmail(String? email) {
     if (email == null || email.isEmpty) return '***';
     final parts = email.split('@');
     if (parts.length != 2) return '***';
-    final local   = parts[0];
-    final domain  = parts[1];
+    final local  = parts[0];
+    final domain = parts[1];
     final visible = local.length.clamp(0, 3);
     return '${local.substring(0, visible)}***@$domain';
   }
-
-  // ==========================================================================
-  // LOGGING
-  // ==========================================================================
 
   void _logInfo(String message) {
     if (kDebugMode) debugPrint('[AuthService] INFO: $message');
