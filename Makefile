@@ -1,31 +1,20 @@
 ## ══════════════════════════════════════════════════════════════════════════════
 ## KHIDMETI BACKEND — Makefile
-##
-## Supported environments (POSIX shell required):
-##   Linux native, macOS, WSL2, GitHub Codespaces
-##
-## Windows CMD / PowerShell users: use  scripts\khidmeti.bat  or  scripts\khidmeti.ps1
-##
 ## ══════════════════════════════════════════════════════════════════════════════
 
 SHELL := /bin/bash
 
-## ── OS detection ──────────────────────────────────────────────────────────────
 OS   := $(shell uname -s 2>/dev/null || echo Windows_NT)
 ARCH := $(shell uname -m 2>/dev/null || echo unknown)
 
-## ── Open-browser command (gracefully no-ops in headless Codespaces) ───────────
 ifeq ($(OS),Darwin)
   OPEN_CMD := open
 else ifeq ($(OS),Windows_NT)
   OPEN_CMD := start
 else
-  ## Linux / WSL / Codespaces — xdg-open may not exist in headless env
   OPEN_CMD := $(shell command -v xdg-open 2>/dev/null || echo "echo 🔗 Open manually: ")
 endif
 
-## ── Portable sed -i ───────────────────────────────────────────────────────────
-## macOS sed requires  sed -i ''  (BSD), Linux/WSL/Codespaces use  sed -i  (GNU)
 SED_I := $(shell \
   if sed --version 2>/dev/null | grep -q GNU; then \
     echo "sed -i"; \
@@ -33,7 +22,6 @@ SED_I := $(shell \
     echo "sed -i ''"; \
   fi)
 
-## ── Local IP (best-effort — used in dns target) ───────────────────────────────
 LOCAL_IP := $(shell \
   ip route get 1 2>/dev/null | awk '{print $$7; exit}' || \
   ifconfig 2>/dev/null | awk '/inet /{print $$2}' | grep -v 127.0.0.1 | head -1 || \
@@ -180,16 +168,29 @@ build: ## Builder l'image NestJS
 rebuild: build start ## Rebuild complet + redemarrage
 
 ## ══════════════════════════════════════════════════════════════════════════════
-## LOGS
+## LOGS  (FIX: recette sur ligne séparée avec tabulation)
 ## ══════════════════════════════════════════════════════════════════════════════
 
-logs:       @docker compose logs --tail=100 -f
-logs-api:   @docker compose logs -f api
-logs-mongo: @docker compose logs -f mongo
-logs-redis: @docker compose logs -f redis
-logs-qdrant:@docker compose logs -f qdrant
-logs-minio: @docker compose logs -f minio
-logs-nginx: @docker compose logs -f nginx
+logs: ## Tous les logs
+	@docker compose logs --tail=100 -f
+
+logs-api: ## Logs NestJS uniquement
+	@docker compose logs -f api
+
+logs-mongo: ## Logs MongoDB
+	@docker compose logs -f mongo
+
+logs-redis: ## Logs Redis
+	@docker compose logs -f redis
+
+logs-qdrant: ## Logs Qdrant
+	@docker compose logs -f qdrant
+
+logs-minio: ## Logs MinIO
+	@docker compose logs -f minio
+
+logs-nginx: ## Logs nginx
+	@docker compose logs -f nginx
 
 ## ══════════════════════════════════════════════════════════════════════════════
 ## DIAGNOSTIC
@@ -254,65 +255,38 @@ dns: ## Afficher les URLs + config Flutter
 	@echo ""
 
 ## ══════════════════════════════════════════════════════════════════════════════
-## TUNNEL CLOUDFLARE — Quick Tunnel (pas de compte requis)
+## TUNNEL CLOUDFLARE
 ## ══════════════════════════════════════════════════════════════════════════════
 
-tunnel-install: ## Installer cloudflared (Linux / WSL / Codespaces)
+tunnel-install: ## Installer cloudflared
 	@echo "Installation de cloudflared..."
 	@if command -v cloudflared >/dev/null 2>&1; then \
 		echo "✅ cloudflared deja installe: $$(cloudflared --version)"; \
-	elif [ -f /etc/debian_version ] || grep -qi debian /etc/os-release 2>/dev/null || grep -qi ubuntu /etc/os-release 2>/dev/null; then \
-		curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null 2>&1 || true; \
+	elif [ -f /etc/debian_version ] || grep -qi ubuntu /etc/os-release 2>/dev/null; then \
 		curl -L --output /tmp/cloudflared.deb \
 		  https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb 2>/dev/null; \
 		sudo dpkg -i /tmp/cloudflared.deb; \
 		rm /tmp/cloudflared.deb; \
-	elif [ "$(OS)" = "Darwin" ]; then \
-		brew install cloudflared; \
 	else \
 		curl -L -o /usr/local/bin/cloudflared \
 		  https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64; \
 		chmod +x /usr/local/bin/cloudflared; \
 	fi
-	@cloudflared --version || echo "⚠️  Relancez votre terminal puis reessayez."
-	@echo "✅ cloudflared installe."
+	@cloudflared --version || echo "⚠️  Relancez votre terminal."
 
-tunnel-quick: ## Lancer un Quick Tunnel (URL aleatoire trycloudflare.com)
-	@echo ""
-	@echo "══════════════════════════════════════════════════════"
-	@echo "  Cloudflare Quick Tunnel — sans compte"
-	@echo "══════════════════════════════════════════════════════"
-	@echo ""
-	@echo "  1) Votre backend sera accessible via une URL HTTPS"
-	@echo "     ex: https://random-words.trycloudflare.com"
-	@echo ""
-	@echo "  2) Copiez l'URL affichee ci-dessous"
-	@echo ""
-	@echo "  3) Firebase Console → Remote Config → api_base_url"
-	@echo "     → collez l'URL → Publish"
-	@echo ""
-	@echo "  4) Tuez et relancez l'app Flutter"
+tunnel-quick: ## Lancer un Quick Tunnel
 	@echo ""
 	@echo "  CTRL+C pour arreter le tunnel."
-	@echo "══════════════════════════════════════════════════════"
 	@echo ""
 	@cloudflared tunnel --url http://localhost:80
 
-tunnel-stop: ## Arreter le(s) tunnel(s) actif(s)
+tunnel-stop: ## Arreter le tunnel
 	@pkill -f 'cloudflared tunnel' 2>/dev/null && echo "✅ Tunnel(s) arretes." || echo "Aucun tunnel actif."
 
 tunnel-status: ## Etat du tunnel
 	@ps aux | grep 'cloudflared tunnel' | grep -v grep || echo "Aucun tunnel actif."
 
-## ══════════════════════════════════════════════════════════════════════════════
-## FLUTTER — raccourci avec IP locale
-## ══════════════════════════════════════════════════════════════════════════════
-
-flutter-run: ## Lance Flutter avec l'IP locale (Layer 2 fallback)
-	@echo ""
-	@echo "  Lancement Flutter avec:"
-	@echo "  API_BASE_URL=http://$(LOCAL_IP):80"
-	@echo ""
+flutter-run: ## Lance Flutter avec l'IP locale
 	@flutter run --dart-define=API_BASE_URL=http://$(LOCAL_IP):80
 
 ## ══════════════════════════════════════════════════════════════════════════════
@@ -343,7 +317,7 @@ ollama-pull: ## Telecharger les modeles Ollama
 ## MINIO
 ## ══════════════════════════════════════════════════════════════════════════════
 
-minio-buckets: ## Creer les buckets MinIO manuellement
+minio-buckets: ## Creer les buckets MinIO
 	@MINIO_ACCESS_KEY=$$(grep MINIO_ACCESS_KEY .env | cut -d= -f2 | tr -d '[:space:]'); \
 	MINIO_SECRET_KEY=$$(grep MINIO_SECRET_KEY .env | cut -d= -f2 | tr -d '[:space:]'); \
 	docker exec khidmeti-minio-init /bin/sh -c "\
@@ -374,7 +348,6 @@ test-api: ## Tester les endpoints principaux
 	@echo ""
 	@echo "  [2] Swagger (HTTP code):"; curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/api/docs
 	@echo ""
-	@echo "  NOTE: Endpoints proteges requierent un token Firebase Bearer."
 
 test-ai: ## Tester l'extraction d'intention IA (make test-ai TOKEN=xxx)
 	@if [ -z "$(TOKEN)" ]; then \
@@ -385,33 +358,6 @@ test-ai: ## Tester l'extraction d'intention IA (make test-ai TOKEN=xxx)
 		  -H "Content-Type: application/json" \
 		  -d '{"text": "jai une fuite deau sous levier"}'; \
 	fi
-
-test-upload: ## Tester l'upload d'image (make test-upload TOKEN=xxx FILE=/path/image.jpg)
-	@if [ -z "$(TOKEN)" ] || [ -z "$(FILE)" ]; then \
-		echo "Usage: make test-upload TOKEN=xxx FILE=/path/image.jpg"; \
-	else \
-		curl -s -X POST http://localhost:3000/media/upload/image \
-		  -H "Authorization: Bearer $(TOKEN)" -F "file=@$(FILE)"; \
-	fi
-
-## ══════════════════════════════════════════════════════════════════════════════
-## PARE-FEU
-## ══════════════════════════════════════════════════════════════════════════════
-
-firewall: ## Afficher les commandes pare-feu
-	@echo ""
-	@echo "  OS detecte: $(OS)"
-	@echo ""
-ifeq ($(OS),Linux)
-	@echo "  # Ubuntu/Debian (ufw):"
-	@echo "  sudo ufw allow 80/tcp 3000/tcp 6333/tcp 9001/tcp 9002/tcp"
-else ifeq ($(OS),Darwin)
-	@echo "  # macOS: Docker Desktop expose les ports automatiquement."
-else
-	@echo "  # Codespaces: onglet PORTS dans VS Code → forwarder 80, 3000, 9001."
-	@echo "  # WSL: les ports sont automatiquement accessibles depuis Windows."
-endif
-	@echo ""
 
 ## ══════════════════════════════════════════════════════════════════════════════
 ## SAUVEGARDE
@@ -428,31 +374,10 @@ backup: ## Sauvegarder MongoDB + MinIO
 	  --out /tmp/backup_$(DATETIME); \
 	docker cp khidmeti-mongo:/tmp/backup_$(DATETIME) backups/mongodb/$(DATETIME); \
 	echo "  ✅ MongoDB → backups/mongodb/$(DATETIME)"
-	@MINIO_KEY=$$(grep MINIO_ACCESS_KEY .env | cut -d= -f2 | tr -d '[:space:]'); \
-	MINIO_SECRET=$$(grep MINIO_SECRET_KEY .env | cut -d= -f2 | tr -d '[:space:]'); \
-	docker run --rm --network khidmeti-network \
-	  -v "$$(pwd)/backups/minio/$(DATETIME):/backup" minio/mc:latest \
-	  sh -c "mc alias set local http://minio:9001 $$MINIO_KEY $$MINIO_SECRET \
-	    && mc mirror local/profile-images /backup/profile-images \
-	    && mc mirror local/service-media   /backup/service-media"; \
-	echo "  ✅ MinIO → backups/minio/$(DATETIME)"
-
-backup-mongo: ## Sauvegarder MongoDB uniquement
-	@mkdir -p backups/mongodb/$(DATETIME)
-	@MONGO_USER=$$(grep MONGO_ROOT_USER .env | cut -d= -f2 | tr -d '[:space:]'); \
-	MONGO_PASS=$$(grep MONGO_ROOT_PASSWORD .env | cut -d= -f2 | tr -d '[:space:]'); \
-	docker exec khidmeti-mongo mongodump \
-	  --username "$$MONGO_USER" --password "$$MONGO_PASS" \
-	  --authenticationDatabase admin --db khidmeti \
-	  --out /tmp/backup_$(DATETIME); \
-	docker cp khidmeti-mongo:/tmp/backup_$(DATETIME) backups/mongodb/$(DATETIME); \
-	echo "✅ MongoDB sauvegarde: backups/mongodb/$(DATETIME)"
 
 restore: ## Restaurer (BACKUP_DATE=YYYYMMDD-HHMMSS)
 	@if [ -z "$(BACKUP_DATE)" ]; then \
-		echo "Usage: make restore BACKUP_DATE=20250101-120000"; \
-		echo "Sauvegardes: $$(ls backups/mongodb/ 2>/dev/null || echo aucune)"; \
-		exit 1; \
+		echo "Usage: make restore BACKUP_DATE=20250101-120000"; exit 1; \
 	fi
 	@MONGO_USER=$$(grep MONGO_ROOT_USER .env | cut -d= -f2 | tr -d '[:space:]'); \
 	MONGO_PASS=$$(grep MONGO_ROOT_PASSWORD .env | cut -d= -f2 | tr -d '[:space:]'); \
@@ -462,10 +387,6 @@ restore: ## Restaurer (BACKUP_DATE=YYYYMMDD-HHMMSS)
 	  --authenticationDatabase admin --db khidmeti --drop \
 	  /tmp/restore_$(BACKUP_DATE)/khidmeti
 	@echo "✅ Restauration terminee."
-
-list-backups: ## Lister les sauvegardes
-	@echo "MongoDB:"; ls backups/mongodb/ 2>/dev/null || echo "  (aucune)"
-	@echo "MinIO:";   ls backups/minio/   2>/dev/null || echo "  (aucune)"
 
 ## ══════════════════════════════════════════════════════════════════════════════
 ## SHELL ET DEBUG
@@ -501,9 +422,7 @@ mongo-stats: ## Stats MongoDB
 
 redis-info: ## Stats Redis
 	@REDIS_PASS=$$(grep REDIS_PASSWORD .env | cut -d= -f2 | tr -d '[:space:]'); \
-	docker exec khidmeti-redis redis-cli -a "$$REDIS_PASS" INFO server; \
-	echo "Cles en cache:"; \
-	docker exec khidmeti-redis redis-cli -a "$$REDIS_PASS" DBSIZE
+	docker exec khidmeti-redis redis-cli -a "$$REDIS_PASS" INFO server
 
 redis-flush: ## Vider le cache Redis
 	@REDIS_PASS=$$(grep REDIS_PASSWORD .env | cut -d= -f2 | tr -d '[:space:]'); \
@@ -543,3 +462,9 @@ prod-update: ## Mettre a jour l'API sans downtime
 	@docker compose build --no-cache api
 	@docker compose up -d --no-deps --build api
 	@echo "✅ API mise a jour."
+
+firewall: ## Afficher les commandes pare-feu
+	@echo "  OS detecte: $(OS)"
+ifeq ($(OS),Linux)
+	@echo "  sudo ufw allow 80/tcp 3000/tcp 6333/tcp 9001/tcp 9002/tcp"
+endif
