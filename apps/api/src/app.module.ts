@@ -2,32 +2,25 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
 import { ThrottlerModule } from '@nestjs/throttler';
-import { DatabaseModule } from './database/database.module';
-import { QdrantModule } from './qdrant/qdrant.module';
-import { FirebaseConfigModule } from './config/firebase.config';
-import { AiModule } from './modules/ai/ai.module';
-import { MediaModule } from './modules/media/media.module';
-import { UsersModule } from './modules/users/users.module';
-import { WorkersModule } from './modules/workers/workers.module';
-import { ServiceRequestsModule } from './modules/service-requests/service-requests.module';
-import { BidsModule } from './modules/bids/bids.module';
-import { LocationModule } from './modules/location/location.module';
-import { NotificationsModule } from './modules/notifications/notifications.module';
-import { GatewayModule } from './modules/gateway/gateway.module';
-import { HealthController } from './health.controller';
+import { DatabaseModule }           from './database/database.module';
+import { QdrantModule }             from './qdrant/qdrant.module';
+import { FirebaseConfigModule }     from './config/firebase.config';
+import { AiModule }                 from './modules/ai/ai.module';
+import { MediaModule }              from './modules/media/media.module';
+import { UsersModule }              from './modules/users/users.module';
+import { WorkersModule }            from './modules/workers/workers.module';
+import { ServiceRequestsModule }    from './modules/service-requests/service-requests.module';
+import { BidsModule }               from './modules/bids/bids.module';
+import { LocationModule }           from './modules/location/location.module';
+import { NotificationsModule }      from './modules/notifications/notifications.module';
+import { GatewayModule }            from './modules/gateway/gateway.module';
+import { HealthController }         from './health.controller';
 
 @Module({
   imports: [
-    // ── Config (env vars) ──────────────────────────────────────────────────
-    ConfigModule.forRoot({
-      isGlobal:    true,
-      envFilePath: '../../.env',
-    }),
-
-    // ── Firebase Admin (verifies ID tokens in FirebaseAuthGuard) ───────────
+    ConfigModule.forRoot({ isGlobal: true, envFilePath: '../../.env' }),
     FirebaseConfigModule,
 
-    // ── MongoDB ────────────────────────────────────────────────────────────
     MongooseModule.forRootAsync({
       imports:    [ConfigModule],
       inject:     [ConfigService],
@@ -39,26 +32,22 @@ import { HealthController } from './health.controller';
       }),
     }),
 
-    // ── Rate limiting ──────────────────────────────────────────────────────
     ThrottlerModule.forRoot([
       { name: 'short',  ttl: 1_000,  limit: 20  },
       { name: 'medium', ttl: 10_000, limit: 100 },
       { name: 'long',   ttl: 60_000, limit: 300 },
     ]),
 
-    // ── Domain modules ─────────────────────────────────────────────────────
     DatabaseModule,
     QdrantModule,
     AiModule,
     MediaModule,
     UsersModule,
-    WorkersModule,
+    WorkersModule,            // facade — delegates to UsersModule internally
     ServiceRequestsModule,
     BidsModule,
     LocationModule,
     NotificationsModule,
-
-    // ── Real-time WebSocket gateways ───────────────────────────────────────
     GatewayModule,
   ],
   controllers: [HealthController],
