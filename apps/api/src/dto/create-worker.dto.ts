@@ -1,25 +1,21 @@
-import {
-  IsString, IsEmail, IsOptional, IsNumber, IsNotEmpty,
-  IsBoolean, MinLength, MaxLength, Min, Max,
-} from 'class-validator';
+// ══════════════════════════════════════════════════════════════════════════════
+// CreateWorkerDto
+//
+// Extends CreateUserDto and enforces role = 'worker'.
+// The backend writes to the unified 'users' collection — no separate collection.
+// ══════════════════════════════════════════════════════════════════════════════
 
-export class CreateWorkerDto {
-  @IsString()
-  @IsNotEmpty()
-  id: string;
+import { IsString, IsNotEmpty, IsBoolean, IsOptional } from 'class-validator';
+import { CreateUserDto } from './create-user.dto';
+import { UserRole } from '../schemas/user.schema';
 
-  @IsString()
-  @IsNotEmpty()
-  @MinLength(2)
-  @MaxLength(50)
-  name: string;
-
-  @IsEmail()
-  email: string;
-
-  @IsString()
-  @IsOptional()
-  phoneNumber?: string;
+export class CreateWorkerDto extends CreateUserDto {
+  /**
+   * Always 'worker' — overrides the parent default of 'client'.
+   * NestJS ValidationPipe strips this if submitted as anything else
+   * because the controller's service enforces it server-side.
+   */
+  readonly role: UserRole = UserRole.Worker;
 
   @IsString()
   @IsNotEmpty()
@@ -28,24 +24,4 @@ export class CreateWorkerDto {
   @IsBoolean()
   @IsOptional()
   isOnline?: boolean;
-
-  @IsNumber()
-  @IsOptional()
-  @Min(-90)
-  @Max(90)
-  latitude?: number;
-
-  @IsNumber()
-  @IsOptional()
-  @Min(-180)
-  @Max(180)
-  longitude?: number;
-
-  @IsString()
-  @IsOptional()
-  profileImageUrl?: string;
-
-  @IsString()
-  @IsOptional()
-  fcmToken?: string;
 }

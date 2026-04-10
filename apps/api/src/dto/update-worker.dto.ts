@@ -1,7 +1,7 @@
 import { PartialType } from '@nestjs/mapped-types';
-import { CreateWorkerDto } from './create-worker.dto';
 import { IsString, IsOptional, IsNumber, IsDate, Min, Max } from 'class-validator';
 import { Type } from 'class-transformer';
+import { CreateWorkerDto } from './create-worker.dto';
 
 export class UpdateWorkerDto extends PartialType(CreateWorkerDto) {
   @IsString()

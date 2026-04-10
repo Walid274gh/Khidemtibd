@@ -1,7 +1,8 @@
 import {
   IsString, IsEmail, IsOptional, IsNumber, IsNotEmpty,
-  MinLength, MaxLength, Min, Max,
+  IsEnum, MinLength, MaxLength, Min, Max,
 } from 'class-validator';
+import { UserRole } from '../schemas/user.schema';
 
 export class CreateUserDto {
   @IsString()
@@ -16,6 +17,11 @@ export class CreateUserDto {
 
   @IsEmail()
   email: string;
+
+  /** Defaults to 'client'. Pass 'worker' when registering a worker account. */
+  @IsEnum(UserRole)
+  @IsOptional()
+  role?: UserRole;
 
   @IsString()
   @IsOptional()
