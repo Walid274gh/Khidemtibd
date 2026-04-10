@@ -10,8 +10,15 @@
 //
 //   linkSocialWorkerProfession() : même correction, `role: 'worker'` ajouté.
 //
-// Tout le reste est identique à la version précédente (3-layer resilient
-// registration, _ensureBackendProfile self-healing, etc.).
+//   _ensureBackendProfile() : FIX (MIGRATION) — suppression de l'appel
+//   redondant getWorker(uid).
+//   AVANT : getUser(uid) → si null → getWorker(uid) → si null → créer profil.
+//   APRÈS : getUser(uid) → si null → créer profil.
+//   Explication : après la fusion des collections, getUser(uid) retourne le
+//   document unifié qu'il soit client OU worker. Si getUser retourne null,
+//   le document n'existe pas — getWorker retournerait null aussi (même
+//   collection, même filtre uid). Le second appel était donc toujours
+//   redondant et ajoutait une latence réseau inutile à chaque login.
 
 import 'dart:async';
 import 'dart:convert';
@@ -350,19 +357,23 @@ class AuthService extends ChangeNotifier {
 
   /// Auto-réparation : garantit l'existence d'un profil MongoDB après chaque login.
   ///
-  /// Couvre : anciens comptes Firestore, échec réseau au moment de l'inscription,
-  /// migration de base de données. Fire-and-forget (.ignore()) — ne bloque jamais.
+  /// FIX (MIGRATION — collection unifiée) :
+  ///   AVANT : getUser(uid) → si null → getWorker(uid) → si null → créer profil
+  ///   APRÈS : getUser(uid) → si null → créer profil
+  ///
+  ///   Le second appel getWorker était redondant : après la fusion des collections,
+  ///   getUser(uid) interroge la collection 'users' sans filtre de rôle — il
+  ///   retourne le document qu'il soit client OU worker. Si getUser retourne null,
+  ///   c'est que le document n'existe pas du tout ; getWorker (qui interroge la
+  ///   même collection avec role='worker') retournerait également null.
+  ///   Supprimer ce second appel économise un aller-retour réseau à chaque login.
   Future<void> _ensureBackendProfile(User firebaseUser) async {
     try {
       final uid = firebaseUser.uid;
 
-      // Un seul document dans la collection unifiée — vérification rapide.
+      // Un seul appel suffit — getUser retourne le document unifié (client ou worker).
       final existingUser = await _firestoreService.getUser(uid);
       if (existingUser != null) return;
-
-      // getUser renvoie null → vérifier aussi côté worker (rôle worker possible)
-      final existingWorker = await _firestoreService.getWorker(uid);
-      if (existingWorker != null) return;
 
       // Aucun profil → créer un profil client minimal depuis les données Firebase.
       final displayName = firebaseUser.displayName?.trim();
