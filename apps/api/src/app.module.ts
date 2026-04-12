@@ -1,6 +1,4 @@
 // apps/api/src/app.module.ts
-// FIX: HealthController now receives AI_PROVIDER_TOKEN via DI
-// to expose circuit breaker health at GET /health/detail
 
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
@@ -51,7 +49,7 @@ import { HealthController }         from './health.controller';
 
     DatabaseModule,
     QdrantModule,
-    AiModule,       // exports AI_PROVIDER_TOKEN — HealthController can inject it
+    AiModule,
     MediaModule,
     UsersModule,
     WorkersModule,
