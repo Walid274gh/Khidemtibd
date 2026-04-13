@@ -1,15 +1,21 @@
 // lib/services/local_ai_service.dart
 //
-// STEP 5 MIGRATION: Replaces AiIntentExtractorService.
+// BUG 4 FIX B — AI image search échoue au premier appel
 //
-// PATCH — Bug 2 fix (photo search):
-//   - _extractWithImage: ContentType explicite via http_parser MediaType
-//   - _detectImageMime: détection depuis magic bytes (pur Dart)
+// PROBLÈME :
+//   1. TIMEOUT cold-start : Gemini met 15–25s sur la première requête
+//      (chargement modèle). Le timeout client était fixé à 15s pour TOUTES les
+//      requêtes → TimeoutException → "Erreur de recherche". Le retry suivant
+//      fonctionnait car le modèle était déjà chaud.
+//   2. Le timeout image partageait la même constante que le timeout texte
+//      (_callTimeout = 15s), trop court pour un cold-start Gemini.
 //
-// PATCH — Bug 3 fix (audio intermittent):
-//   - _isBusy scindé en _isBusyText + _isBusyAudio (isolation)
-//   - extractFromAudio: retry x2 sur 5xx/timeout
-//   - ContentType explicite sur le multipart audio
+// SOLUTION :
+//   • _callTimeoutText  = 15s  (inchangé — texte est rapide)
+//   • _callTimeoutImage = 30s  (augmenté — cold-start Gemini ~20s)
+//   • _extractWithImage() : retry x2 sur TimeoutException avec 2s de délai
+//     (si Gemini cold-start dépasse même 30s au premier appel, le second
+//     appel trouvera le modèle chaud et répondra en < 5s)
 
 import 'dart:async';
 import 'dart:collection';
@@ -54,24 +60,25 @@ class LocalAiService {
   final String      _baseUrl;
   final http.Client _http;
 
-  static const Duration _callTimeout     = Duration(seconds: 15);
-  static const int      _cacheCapacity   = 20;
-  static const int      _maxCallsPerHour = 20;
+  // BUG 4 FIX B : deux timeouts distincts
+  // • texte/audio : 15s  — réponse rapide sur modèle chaud
+  // • image       : 30s  — cold-start Gemini peut atteindre ~25s
+  static const Duration _callTimeoutText  = Duration(seconds: 15);
+  static const Duration _callTimeoutImage = Duration(seconds: 30);
 
-  // BUG 3 FIX: scinder en deux pour ne pas bloquer l'audio quand une
-  // requête image/texte est en cours (et vice-versa).
+  static const int _cacheCapacity   = 20;
+  static const int _maxCallsPerHour = 20;
+
   bool _isBusyText  = false; // garde pour extract() text + image
   bool _isBusyAudio = false; // garde pour extractFromAudio()
 
   bool get isBusy => _isBusyText || _isBusyAudio;
 
-  // LRU cache (text-only queries)
   final _cache = LinkedHashMap<String, SearchIntent>(
     equals:   (a, b) => a == b,
     hashCode: (k) => k.hashCode,
   );
 
-  // Rate limiter
   final List<DateTime> _callTimestamps = [];
 
   LocalAiService({required String baseUrl, http.Client? httpClient})
@@ -110,10 +117,9 @@ class LocalAiService {
       FirebaseAuth.instance.currentUser?.getIdToken();
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // Public API — identical signatures to AiIntentExtractorService
+  // Public API
   // ═══════════════════════════════════════════════════════════════════════════
 
-  /// Extracts a [SearchIntent] from [text] and/or [imageBytes].
   Future<SearchIntent> extract(
     String text, {
     Uint8List? imageBytes,
@@ -129,7 +135,6 @@ class LocalAiService {
       );
     }
 
-    // BUG 3 FIX: utiliser _isBusyText uniquement (pas _isBusyAudio)
     if (_isBusyText) {
       throw const AiIntentExtractorException(
         'Already processing a request',
@@ -154,6 +159,8 @@ class LocalAiService {
     try {
       SearchIntent result;
       if (hasImage) {
+        // BUG 4 FIX B : déléguer à _extractWithImage() qui gère
+        // le timeout long (30s) et le retry x2.
         result = await _extractWithImage(text, imageBytes!, mime);
       } else {
         result = await _extractText(text);
@@ -166,8 +173,6 @@ class LocalAiService {
     }
   }
 
-  /// Extracts a [SearchIntent] from raw audio bytes.
-  /// BUG 3 FIX: retry x2 sur 5xx/timeout + _isBusyAudio séparé.
   Future<SearchIntent> extractFromAudio(
     Uint8List audioBytes, {
     String mime       = 'audio/m4a',
@@ -180,7 +185,6 @@ class LocalAiService {
       );
     }
 
-    // BUG 3 FIX: garde audio indépendante de la garde texte/image
     if (_isBusyAudio) {
       throw const AiIntentExtractorException(
         'Already processing an audio request',
@@ -208,7 +212,6 @@ class LocalAiService {
           );
           if (token != null) request.headers['Authorization'] = 'Bearer $token';
 
-          // BUG 3 FIX: MediaType explicite pour éviter application/octet-stream
           request.files.add(http.MultipartFile.fromBytes(
             'file',
             audioBytes,
@@ -216,10 +219,10 @@ class LocalAiService {
             contentType: MediaType.parse(mime),
           ));
 
-          final streamed = await request.send().timeout(_callTimeout);
+          // Audio utilise le timeout texte (15s) — il n'a pas de cold-start image
+          final streamed = await request.send().timeout(_callTimeoutText);
           final response = await http.Response.fromStream(streamed);
 
-          // Retry sur erreur 5xx transitoire (503 overload, 502 gateway)
           if (response.statusCode >= 500 && attempt < maxRetries) {
             if (kDebugMode) {
               debugPrint('[LocalAiService] Audio attempt $attempt failed '
@@ -233,7 +236,7 @@ class LocalAiService {
           return _parseResponse(response);
 
         } on AiIntentExtractorException {
-          rethrow; // quota/overload → pas de retry
+          rethrow;
         } on TimeoutException {
           lastError = const AiIntentExtractorException(
             'Audio request timed out',
@@ -271,55 +274,103 @@ class LocalAiService {
         if (token != null) 'Authorization': 'Bearer $token',
       },
       body: jsonEncode({'text': text.trim()}),
-    ).timeout(_callTimeout);
+    ).timeout(_callTimeoutText);
     return _parseResponse(response);
   }
 
-  /// BUG 2 FIX: ContentType explicite depuis magic bytes.
+  // ─────────────────────────────────────────────────────────────────────────
+  // BUG 4 FIX B — _extractWithImage()
+  //
+  // Timeout augmenté à 30s (_callTimeoutImage) pour absorber le cold-start
+  // Gemini (~15–25s sur la première requête).
+  //
+  // Retry x2 sur TimeoutException :
+  //   • Attempt 1 : peut timeout si Gemini était en cold-start
+  //   • Attempt 2 : modèle maintenant chaud → réponse en < 5s
+  //   • Les erreurs quota/overload (AiIntentExtractorException) ne sont PAS
+  //     retentées — elles indiquent un problème permanent.
+  // ─────────────────────────────────────────────────────────────────────────
   Future<SearchIntent> _extractWithImage(
-      String text, Uint8List imageBytes, String? mime) async {
-    // Détecter le vrai MIME depuis les magic bytes (plus fiable que le param)
+    String text,
+    Uint8List imageBytes,
+    String? mime,
+  ) async {
     final detectedMime = _detectImageMime(imageBytes) ?? mime ?? 'image/jpeg';
-    final extension    = detectedMime == 'image/png' ? 'png' : 'jpg';
+    final extension    = detectedMime == 'image/png'
+        ? 'png'
+        : detectedMime == 'image/webp'
+            ? 'webp'
+            : 'jpg';
 
-    final token   = await _getToken();
-    final request = http.MultipartRequest(
-      'POST',
-      Uri.parse('$_baseUrl/ai/extract-intent/image'),
-    );
-    if (token != null) request.headers['Authorization'] = 'Bearer $token';
+    Exception? lastError;
 
-    // BUG 2 FIX: MediaType explicite — évite application/octet-stream
-    request.files.add(http.MultipartFile.fromBytes(
-      'file',
-      imageBytes,
-      filename:    'image.$extension',
-      contentType: MediaType.parse(detectedMime),
-    ));
+    // BUG 4 FIX B : retry x2 sur timeout (cold-start Gemini)
+    for (int attempt = 1; attempt <= 2; attempt++) {
+      try {
+        final token   = await _getToken();
+        final request = http.MultipartRequest(
+          'POST',
+          Uri.parse('$_baseUrl/ai/extract-intent/image'),
+        );
+        if (token != null) request.headers['Authorization'] = 'Bearer $token';
 
-    // Contexte textuel optionnel (aide Gemini à identifier le problème)
-    if (text.trim().isNotEmpty) {
-      request.fields['text'] = text.trim();
+        // MediaType explicite — évite application/octet-stream
+        request.files.add(http.MultipartFile.fromBytes(
+          'file',
+          imageBytes,
+          filename:    'image.$extension',
+          contentType: MediaType.parse(detectedMime),
+        ));
+
+        if (text.trim().isNotEmpty) {
+          request.fields['text'] = text.trim();
+        }
+
+        // BUG 4 FIX B : timeout image = 30s (au lieu de 15s partagé)
+        final streamed = await request.send().timeout(_callTimeoutImage);
+        final response = await http.Response.fromStream(streamed);
+        return _parseResponse(response);
+
+      } on AiIntentExtractorException {
+        // quota / overload → ne pas retenter
+        rethrow;
+      } on TimeoutException {
+        lastError = AiIntentExtractorException(
+          'Image analysis timed out (attempt $attempt/2)',
+          code: AiExtractorErrorCode.timeout,
+        );
+        if (attempt < 2) {
+          if (kDebugMode) {
+            debugPrint('[LocalAiService] Image timeout (attempt $attempt/2), retrying...');
+          }
+          await Future.delayed(const Duration(seconds: 2));
+        }
+      } catch (e) {
+        lastError = _classifyError(e);
+        break; // erreur non-timeout → pas de retry
+      }
     }
 
-    final streamed = await request.send().timeout(_callTimeout);
-    final response = await http.Response.fromStream(streamed);
-    return _parseResponse(response);
+    throw lastError ??
+        const AiIntentExtractorException(
+          'Image extraction failed',
+          code: AiExtractorErrorCode.network,
+        );
   }
 
-  /// BUG 2 FIX: Détection MIME depuis magic bytes — évite application/octet-stream.
+  /// Détection MIME depuis magic bytes — évite application/octet-stream.
   String? _detectImageMime(Uint8List bytes) {
     if (bytes.length < 4) return null;
-    // JPEG: FF D8 FF
+    // JPEG : FF D8 FF
     if (bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF) {
       return 'image/jpeg';
     }
-    // PNG: 89 50 4E 47
+    // PNG : 89 50 4E 47
     if (bytes[0] == 0x89 && bytes[1] == 0x50 &&
         bytes[2] == 0x4E && bytes[3] == 0x47) {
       return 'image/png';
     }
-    // WebP: RIFF....WEBP
+    // WebP : RIFF....WEBP (12 octets minimum)
     if (bytes.length >= 12 &&
         bytes[0] == 0x52 && bytes[1] == 0x49 &&
         bytes[2] == 0x46 && bytes[3] == 0x46 &&
@@ -351,7 +402,6 @@ class LocalAiService {
     }
     try {
       final decoded = jsonDecode(response.body);
-      // NestJS ResponseInterceptor wraps: { success, data, timestamp }
       final Map<String, dynamic> json;
       if (decoded is Map && decoded['success'] == true && decoded.containsKey('data')) {
         json = (decoded['data'] as Map).cast<String, dynamic>();

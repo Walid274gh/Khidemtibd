@@ -2,12 +2,11 @@
 //
 // MIGRATION — COLLECTION UNIFIÉE
 // PATCH — Hybrid HTTP+WS streams (Bug 1 fix)
-//
-// Tous les streams délèguent désormais à _hybridRequestStream / _hybridBidStream :
-//   1. GET HTTP immédiat → émet les données au listener
-//   2. Signal WebSocket arrive → re-fetch HTTP → émet la nouvelle liste
-//
-// Aucun changement requis dans les controllers ou providers.
+// PATCH — Bug 1 POST /bids 400 fix: createBid() now sends ONLY the fields
+//   declared in CreateBidDto. ValidationPipe (forbidNonWhitelisted:true) in
+//   main.ts rejects any unknown field with 400 before reaching the service.
+//   bid.toMap() included id/status/createdAt/expiresAt/acceptedAt which are
+//   all absent from CreateBidDto → instant 400.
 
 import 'dart:async';
 import 'dart:convert';
@@ -163,14 +162,6 @@ class ApiService {
   // ═══════════════════════════════════════════════════════════════════════════
   // HYBRID STREAM UTILITIES — BUG 1 FIX
   // ═══════════════════════════════════════════════════════════════════════════
-  //
-  // Principe :
-  //   1. À l'abonnement → GET HTTP immédiat → émet les données
-  //   2. Signal WebSocket → re-fetch HTTP → émet la liste à jour
-  //
-  // Les streams WS purs de RealtimeService n'émettent que sur événements
-  // futurs → liste vide au chargement de l'écran.
-  // Ce pattern hybride garantit des données dès le premier frame.
 
   Stream<List<ServiceRequestEnhancedModel>> _hybridRequestStream({
     required String httpQuery,
@@ -196,9 +187,9 @@ class ApiService {
 
     ctrl = StreamController<List<ServiceRequestEnhancedModel>>.broadcast(
       onListen: () {
-        fetch(); // HTTP initial, non-bloquant
+        fetch();
         wsSub = wsSignal.listen(
-          (_) => fetch(), // signal d'invalidation → re-fetch
+          (_) => fetch(),
           onError: (Object e) { if (!ctrl.isClosed) ctrl.addError(e); },
           cancelOnError: false,
         );
@@ -517,13 +508,11 @@ class ApiService {
     });
   }
 
-  // ── Stream methods — HYBRID HTTP+WS (Bug 1 fix) ──────────────────────────
+  // ── Stream methods — HYBRID HTTP+WS ──────────────────────────────────────
 
-  /// Single request stream: WS already pushes full payload, no hybrid needed.
   Stream<ServiceRequestEnhancedModel?> streamServiceRequest(String requestId) =>
       _realtime.streamServiceRequest(requestId);
 
-  /// Client's request list — HTTP initial + WS invalidation.
   Stream<List<ServiceRequestEnhancedModel>> streamUserServiceRequests(
       String userId) =>
       _hybridRequestStream(
@@ -531,7 +520,6 @@ class ApiService {
         wsSignal: _realtime.streamUserServiceRequests(userId),
       );
 
-  /// Worker's assigned requests — HTTP initial + WS invalidation.
   Stream<List<ServiceRequestEnhancedModel>> streamWorkerServiceRequests(
       String workerId, {int? wilayaCode}) {
     final query = StringBuffer(
@@ -545,7 +533,6 @@ class ApiService {
     );
   }
 
-  /// Available requests for Browse tab — HTTP initial + WS invalidation.
   Stream<List<ServiceRequestEnhancedModel>> streamAvailableRequests({
     required int wilayaCode,
     required String serviceType,
@@ -560,7 +547,6 @@ class ApiService {
             wilayaCode: wilayaCode, serviceType: serviceType),
       );
 
-  /// Worker active jobs — HTTP initial + WS invalidation.
   Stream<List<ServiceRequestEnhancedModel>> streamWorkerActiveJobs(
       String workerId) =>
       _hybridRequestStream(
@@ -569,7 +555,6 @@ class ApiService {
         wsSignal: _realtime.streamWorkerActiveJobs(workerId),
       );
 
-  /// Worker assigned requests (worker home screen) — HTTP initial + WS invalidation.
   Stream<List<ServiceRequestEnhancedModel>> streamWorkerAssignedRequests(
       String workerId, {int limit = 30}) =>
       _hybridRequestStream(
@@ -591,9 +576,49 @@ class ApiService {
         wsSignal: _realtime.streamWorkerBids(workerId),
       );
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // BUG 1 FIX — createBid()
+  //
+  // PROBLÈME : bid.toMap() sérialisait TOUS les champs du modèle, y compris
+  //   id, status, createdAt, expiresAt, acceptedAt — absents de CreateBidDto.
+  //   ValidationPipe (forbidNonWhitelisted:true) dans main.ts déclenche
+  //   immédiatement un BadRequestException 400 avant d'atteindre le service.
+  //
+  // SOLUTION : construire manuellement le payload avec UNIQUEMENT les champs
+  //   déclarés dans CreateBidDto (src/dto/create-bid.dto.ts) :
+  //   serviceRequestId, workerId, workerName, workerAverageRating,
+  //   workerJobsCompleted, workerProfileImageUrl?, proposedPrice,
+  //   estimatedMinutes, availableFrom, message?, expiresAt?
+  // ─────────────────────────────────────────────────────────────────────────
   Future<WorkerBidModel> createBid(WorkerBidModel bid) async {
     _ensureNotDisposed();
-    final data = await _post('/bids', bid.toMap());
+
+    // CRITICAL: ne transmettre QUE les champs déclarés dans CreateBidDto.
+    // Tout champ supplémentaire (id, status, createdAt…) déclenche un 400
+    // via ValidationPipe(forbidNonWhitelisted:true).
+    final payload = <String, dynamic>{
+      'serviceRequestId':    bid.serviceRequestId,
+      'workerId':            bid.workerId,
+      'workerName':          bid.workerName,
+      'workerAverageRating': bid.workerAverageRating,
+      'workerJobsCompleted': bid.workerJobsCompleted,
+      'proposedPrice':       bid.proposedPrice,
+      'estimatedMinutes':    bid.estimatedMinutes,
+      'availableFrom':       bid.availableFrom.toIso8601String(),
+    };
+
+    // Champs optionnels : n'ajouter que s'ils ont une valeur non-nulle/non-vide
+    if (bid.workerProfileImageUrl != null) {
+      payload['workerProfileImageUrl'] = bid.workerProfileImageUrl;
+    }
+    if (bid.message?.isNotEmpty == true) {
+      payload['message'] = bid.message;
+    }
+    if (bid.expiresAt != null) {
+      payload['expiresAt'] = bid.expiresAt!.toIso8601String();
+    }
+
+    final data = await _post('/bids', payload);
     return WorkerBidModel.fromJson(data as Map<String, dynamic>);
   }
 
