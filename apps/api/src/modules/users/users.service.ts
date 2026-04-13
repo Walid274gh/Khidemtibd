@@ -1,13 +1,28 @@
-// ══════════════════════════════════════════════════════════════════════════════
-// UsersService — Unified service for ALL users (clients and workers)
+// apps/api/src/modules/users/users.service.ts
 //
-// Architecture:
-//   • One Model<UserDocument> is injected — queries are discriminated by `role`.
-//   • Worker-facing methods are grouped under the "Worker API" section.
-//   • WorkersService is a thin facade that calls these methods with the correct
-//     role filter. No business logic lives in WorkersService.
-//   • Bayesian rating is computed here — the single authoritative location.
-// ══════════════════════════════════════════════════════════════════════════════
+// ADDED: ensureExists(uid, claims)
+//
+// ROOT CAUSE of the "Erreur lors de l'envoi" bug (Image 6):
+//   A Firebase Auth account existed (JWT was valid → FirebaseAuthGuard passed),
+//   but the corresponding MongoDB document in the 'users' collection had never
+//   been created.  This happens when:
+//     1. The Flutter app created the Firebase account successfully, AND
+//     2. The network call to POST /users (createOrUpdateUser) failed silently
+//        during registration (timeout, app killed, no network), OR
+//     3. _ensureBackendProfile() in AuthService fired after signIn but the
+//        request never reached the server.
+//
+// FIX STRATEGY — "upsert on demand":
+//   UsersController.findById() calls ensureExists() when the requester is
+//   querying their own uid.  ensureExists() is idempotent: if the document
+//   already exists it is returned unchanged.  If not, a minimal 'client' profile
+//   is created from the Firebase token claims (email, displayName).  This is
+//   safe because:
+//     • The JWT has already been verified by FirebaseAuthGuard.
+//     • We only auto-provision for the authenticated user's OWN uid.
+//     • The created document has role='client' — correct for a new user.
+//     • A subsequent POST /users from the Flutter app will upsert additional
+//       fields (phone, profileImageUrl, etc.) over the auto-provisioned stub.
 
 import {
   Injectable,
@@ -33,6 +48,13 @@ export interface UserFilters {
   limit?: number;
 }
 
+export interface ProvisionClaims {
+  /** Firebase displayName — used as the account's name. */
+  name?: string | undefined;
+  /** Firebase email — used as the account's email. */
+  email?: string | undefined;
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 
 @Injectable()
@@ -48,7 +70,6 @@ export class UsersService {
   // SHARED (client + worker)
   // ═══════════════════════════════════════════════════════════════════════════
 
-  /** Create or update any user document. Role defaults to 'client'. */
   async upsert(dto: CreateUserDto | CreateWorkerDto): Promise<UserDocument> {
     try {
       const role = dto.role ?? UserRole.Client;
@@ -64,7 +85,6 @@ export class UsersService {
         lastUpdated: new Date(),
       };
 
-      // Worker-specific fields — only set when explicitly provided
       if ('profession' in dto && dto.profession)       patch['profession'] = dto.profession;
       if ('isOnline'   in dto && dto.isOnline != null) patch['isOnline']   = dto.isOnline;
 
@@ -93,6 +113,47 @@ export class UsersService {
 
   async findByIdOrNull(id: string): Promise<UserDocument | null> {
     return this.userModel.findById(id).exec();
+  }
+
+  /**
+   * Idempotent "upsert on demand".
+   *
+   * Returns the existing document unchanged if it already exists.
+   * If the user is absent from MongoDB (e.g. profile creation failed during
+   * registration), creates a minimal stub from the Firebase token claims.
+   *
+   * This is the canonical fix for the "Erreur lors de l'envoi" 404 scenario:
+   * the JWT is valid (Firebase Auth has the account), but the MongoDB profile
+   * was never persisted.
+   *
+   * @param uid    Firebase UID — used as the document _id.
+   * @param claims Decoded token fields (email, displayName) for the stub.
+   */
+  async ensureExists(uid: string, claims: ProvisionClaims): Promise<UserDocument> {
+    // Fast path: document already exists — no write needed.
+    const existing = await this.findByIdOrNull(uid);
+    if (existing) return existing;
+
+    // Derive a sensible display name from what the token gives us.
+    const name =
+      claims.name?.trim() ||
+      claims.email?.split('@')[0] ||
+      'User';
+
+    this.logger.warn(
+      `Auto-provisioning missing MongoDB profile for uid=${uid} ` +
+      `(email=${claims.email ?? 'unknown'}) — this indicates a registration ` +
+      `race condition.  The Flutter app will upsert the full profile shortly.`,
+    );
+
+    return this.upsert({
+      id:    uid,
+      name,
+      email: claims.email ?? '',
+      role:  UserRole.Client,
+      // All other fields take their schema defaults:
+      //   phoneNumber: '', latitude: null, longitude: null, etc.
+    });
   }
 
   async findMany(filters: UserFilters): Promise<UserDocument[]> {
@@ -179,12 +240,10 @@ export class UsersService {
   // WORKER API  (all queries enforce role = 'worker')
   // ═══════════════════════════════════════════════════════════════════════════
 
-  /** Upsert a user document with role='worker'. */
   async upsertWorker(dto: CreateWorkerDto): Promise<UserDocument> {
     return this.upsert({ ...dto, role: UserRole.Worker });
   }
 
-  /** Find a worker by ID (throws 404 if not found OR if role ≠ worker). */
   async findWorkerById(id: string): Promise<UserDocument> {
     try {
       const doc = await this.userModel
@@ -198,12 +257,10 @@ export class UsersService {
     }
   }
 
-  /** Same as findWorkerById but returns null instead of throwing. */
   async findWorkerByIdOrNull(id: string): Promise<UserDocument | null> {
     return this.userModel.findOne({ _id: id, role: UserRole.Worker }).exec();
   }
 
-  /** Query workers with optional filters. */
   async findWorkers(filters: Omit<UserFilters, 'role'>): Promise<UserDocument[]> {
     return this.findMany({ ...filters, role: UserRole.Worker });
   }
@@ -296,12 +353,6 @@ export class UsersService {
     }
   }
 
-  /**
-   * Apply Bayesian average rating update.
-   *
-   * Formula: (m × C + Σratings) / (m + n)
-   *   C = 3.5 (global average)   m = 10 (confidence weight)
-   */
   async applyRating(id: string, stars: number): Promise<void> {
     try {
       const worker = await this.userModel
@@ -335,7 +386,6 @@ export class UsersService {
     }
   }
 
-  // ── Stream helper (for location gateway) ─────────────────────────────────
   async getWorkerForGateway(
     uid: string,
   ): Promise<Pick<UserDocument, 'wilayaCode' | 'profession' | 'isOnline'> | null> {
