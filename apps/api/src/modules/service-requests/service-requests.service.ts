@@ -1,3 +1,24 @@
+// apps/api/src/modules/service-requests/service-requests.service.ts
+//
+// BUG 3 FIX — Browse worker vide
+//
+// PROBLÈME (multi-couches) :
+//   1. La service request créée par le client peut avoir wilayaCode: null en
+//      base si le GPS n'était pas résolu. La query WHERE wilayaCode = 31 ne
+//      matche pas un document avec wilayaCode: null → résultat vide silencieux.
+//   2. Le controller Flutter envoie wilayaCode=0 comme sentinelle quand le
+//      worker n'a pas de wilayaCode assigné. Sans garde, on chercherait
+//      wilayaCode = 0 en base, ce qui retourne toujours [].
+//
+// SOLUTION :
+//   • Si filters.wilayaCode est défini ET non-nul ET non-zéro :
+//       query['wilayaCode'] = { $in: [filters.wilayaCode, null] }
+//     → capture à la fois les requests correctement géo-tagguées ET celles
+//       qui n'ont pas de wilayaCode (créées avant résolution GPS).
+//   • Si filters.wilayaCode est 0 (sentinelle Flutter) ou undefined :
+//       aucun filtre géographique → retourne toutes les demandes ouvertes
+//       correspondant aux autres critères (serviceType, status…).
+
 import {
   BadRequestException,
   ForbiddenException,
@@ -34,7 +55,7 @@ export class ServiceRequestsService {
     private readonly requestModel: Model<ServiceRequestDocument>,
     @InjectModel(WorkerBid.name)
     private readonly bidModel: Model<WorkerBidDocument>,
-    // ↓ UsersService instead of WorkersService — rating applied on unified collection
+    // UsersService instead of WorkersService — rating applied on unified collection
     private readonly usersService: UsersService,
   ) {}
 
@@ -64,11 +85,35 @@ export class ServiceRequestsService {
     return doc;
   }
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // BUG 3 FIX — findMany()
+  //
+  // AVANT :
+  //   if (filters.wilayaCode != null) query['wilayaCode'] = filters.wilayaCode;
+  //   → wilayaCode = 31 ne matche jamais un document avec wilayaCode: null
+  //   → résultat [] silencieux pour toutes les requests sans géo-tag
+  //
+  // APRÈS :
+  //   wilayaCode = 0  → sentinelle Flutter "pas de filtre géographique"
+  //                     → pas de clause wilayaCode dans la query
+  //   wilayaCode > 0  → $in: [wilayaCode, null]
+  //                     → matche les requests géo-tagguées ET celles sans tag
+  // ─────────────────────────────────────────────────────────────────────────
   async findMany(filters: ServiceRequestFilters): Promise<ServiceRequestDocument[]> {
     const query: Partial<Record<string, unknown>> = {};
-    if (filters.userId)      query['userId']      = filters.userId;
-    if (filters.workerId)    query['workerId']    = filters.workerId;
-    if (filters.wilayaCode != null) query['wilayaCode'] = filters.wilayaCode;
+
+    if (filters.userId)   query['userId']   = filters.userId;
+    if (filters.workerId) query['workerId'] = filters.workerId;
+
+    // BUG 3 FIX : wilayaCode null en base ne matche jamais { wilayaCode: N }.
+    // On utilise $in: [N, null] pour capturer les deux cas.
+    // wilayaCode = 0 est le sentinelle Flutter "worker sans géo-tag" :
+    // dans ce cas on ne filtre pas par wilaya pour éviter un résultat vide.
+    if (filters.wilayaCode != null && filters.wilayaCode !== 0) {
+      query['wilayaCode'] = { $in: [filters.wilayaCode, null] };
+    }
+    // wilayaCode === 0 ou undefined → aucun filtre géographique
+
     if (filters.serviceType) query['serviceType'] = filters.serviceType;
 
     if (filters.status) {
