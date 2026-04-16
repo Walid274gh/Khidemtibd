@@ -18,7 +18,9 @@ import 'package:http/http.dart' as http;
 
 import '../models/geographic_cell.dart';
 import '../models/notification_model.dart';
+import '../models/profession_model.dart';
 import '../models/service_request_enhanced_model.dart';
+import '../models/user_check_result.dart';
 import '../models/user_model.dart';
 import '../models/worker_bid_model.dart';
 import '../models/worker_model.dart';
@@ -307,6 +309,56 @@ class ApiService {
 
   Future<void> updateUserFcmToken(String userId, String token) =>
       updateFcmToken(userId, token);
+
+  // ── Auth check ─────────────────────────────────────────────────────────────
+
+  /// Checks whether a Firebase UID has a backend profile.
+  ///
+  /// Calls GET /auth/check?uid=[uid] — requires a valid Firebase JWT.
+  ///
+  /// Returns [UserCheckResult.newUser] as a safe default on any error so
+  /// the caller navigates to /role-selection (no data loss risk).
+  Future<UserCheckResult> checkAuthUser(String uid) async {
+    _ensureNotDisposed();
+    try {
+      final data = await _get(
+        '/auth/check?uid=${Uri.encodeComponent(uid)}',
+      );
+      if (data == null) return UserCheckResult.newUser;
+      return UserCheckResult.fromJson(data as Map<String, dynamic>);
+    } on ApiServiceException catch (e) {
+      if (kDebugMode) debugPrint('[ApiService] checkAuthUser error: $e');
+      // Treat any error as new user — setup screen handles upsert safely.
+      return UserCheckResult.newUser;
+    }
+  }
+
+  // ── Professions ────────────────────────────────────────────────────────────
+
+  /// Fetches the active profession list from GET /professions?lang=[lang].
+  ///
+  /// Returns an empty list on error — the caller
+  /// (ProfessionsNotifier) falls back to [kDefaultProfessions].
+  ///
+  /// The endpoint is public (no auth required) and cached 24h client-side.
+  Future<List<ProfessionModel>> getProfessions({String lang = 'fr'}) async {
+    _ensureNotDisposed();
+    try {
+      final data = await _get(
+        '/professions?lang=${Uri.encodeComponent(lang)}',
+      );
+      if (data == null) return const [];
+      return (data as List)
+          .map((e) => ProfessionModel.fromJson(
+                (e as Map).cast<String, dynamic>(),
+                lang: lang,
+              ))
+          .toList();
+    } on ApiServiceException catch (e) {
+      if (kDebugMode) debugPrint('[ApiService] getProfessions error: $e');
+      return const [];
+    }
+  }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // MÉTHODES WORKER
