@@ -120,6 +120,12 @@
 //     fabClearance is retained for backward-compat with any FAB that
 //     only needs to clear the nav bar height without breathing room.
 //
+// CHANGES (phone auth migration):
+//   [PHONE-AUTH] 5 new AppRoutes constants added for the phone-auth flow:
+//     onboarding, phoneAuth, roleSelection, userProfileSetup, workerProfileSetup.
+//   [PHONE-AUTH] Old email-auth AppRoutes constants retained for backward
+//     compatibility — they are unused and will be removed in a future cleanup.
+//
 // TODO(S3-grid-audit): spacingTileInner (14dp), badgePaddingV (3dp), and
 //   spacingXxs (2dp) are off the 4dp grid. No immediate visual regression —
 //   schedule for next design-system alignment pass with designer sign-off.
@@ -612,10 +618,6 @@ class AppRoutes {
   AppRoutes._();
 
   static const String splash            = '/';
-  static const String login             = '/login';
-  static const String register          = '/register';
-  static const String forgotPassword    = '/forgot-password';
-  static const String emailVerification = '/verify-email';
   static const String home              = '/home';
   static const String search            = '/search';
   static const String requests          = '/requests';
@@ -634,6 +636,35 @@ class AppRoutes {
   static const String clientRating      = '/service-request/:id/rating';
   static const String submitBid         = '/worker/jobs/:id/bid';
   static const String workerJobDetail   = '/worker/jobs/:id';
+
+  // ── Phone-auth flow ────────────────────────────────────────────────────────
+  // Added in phone-auth migration. Replaces the old email-auth routes below.
+
+  /// First-launch onboarding slides (3 screens).
+  static const String onboarding         = '/onboarding';
+
+  /// Phone number entry + OTP verification.
+  static const String phoneAuth          = '/phone-auth';
+
+  /// Role picker shown to new users after successful phone auth.
+  static const String roleSelection      = '/role-selection';
+
+  /// Client profile setup (name + avatar).
+  static const String userProfileSetup   = '/user-profile-setup';
+
+  /// Worker profile setup (name + avatar + profession).
+  static const String workerProfileSetup = '/worker-profile-setup';
+
+  // ── Legacy email-auth routes — DEPRECATED ─────────────────────────────────
+  // Kept to avoid breaking any remaining reference. Remove after full cleanup.
+  // @deprecated Use phoneAuth instead.
+  static const String login             = '/login';
+  // @deprecated
+  static const String register          = '/register';
+  // @deprecated
+  static const String forgotPassword    = '/forgot-password';
+  // @deprecated
+  static const String emailVerification = '/verify-email';
 
   // KEPT — used only in app_router.dart redirect logic (not a registered route):
   static const String workerHome = '/worker-home';
