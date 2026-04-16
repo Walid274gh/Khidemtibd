@@ -651,6 +651,10 @@ class PrefKeys {
   static const String accountRole   = 'account_role';
   static const String fcmToken      = 'fcm_token';
   static const String lastLocation  = 'last_location';
+
+  /// Persisted by OnboardingController when user taps "Get started".
+  /// Read by the router on every redirect to gate /onboarding display.
+  static const String onboardingDone = 'onboarding_done';
 }
 
 class UserType {
