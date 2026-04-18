@@ -47,6 +47,25 @@ function Get-EnvValue([string]$key) {
   return ""
 }
 
+# ── Écriture d'une valeur dans .env (crée ou remplace) ───────────────────────
+function Set-EnvValue([string]$key, [string]$value) {
+  if (-not (Test-Path ".env")) { return }
+  $content = Get-Content ".env"
+  if ($content | Where-Object { $_ -match "^$key=" }) {
+    $content = $content -replace "^$key=.*", "$key=$value"
+  } else {
+    $content += "$key=$value"
+  }
+  $content | Set-Content ".env" -Encoding UTF8
+}
+
+# ── Suppression d'une clé dans .env ───────────────────────────────────────────
+function Remove-EnvValue([string]$key) {
+  if (-not (Test-Path ".env")) { return }
+  $content = Get-Content ".env" | Where-Object { $_ -notmatch "^$key=" }
+  $content | Set-Content ".env" -Encoding UTF8
+}
+
 # ── Health check ──────────────────────────────────────────────────────────────
 function Test-Endpoint([string]$label, [string]$url) {
   try {
@@ -96,8 +115,7 @@ if ($Command -like "scripts-*" -and
     $Command -ne "scripts-migrations" -and
     $Command -ne "scripts-seeds") {
 
-  $scriptName = $Command.Substring(8)   # retire "scripts-"
-
+  $scriptName = $Command.Substring(8)
   $migPath  = "scripts\migrations\$scriptName.js"
   $seedPath = "apps\api\src\scripts\seeds\$scriptName.ts"
 
@@ -106,11 +124,9 @@ if ($Command -like "scripts-*" -and
   if (Test-Path $migPath) {
     $ok = Invoke-Migration $migPath
     if ($ok) { Write-Ok "$scriptName.js OK" } else { Write-Err "$scriptName.js ECHEC"; exit 1 }
-
   } elseif (Test-Path $seedPath) {
     $ok = Invoke-Seed $seedPath $ScriptArgs
     if ($ok) { Write-Ok "$scriptName.ts OK" } else { Write-Err "$scriptName.ts ECHEC"; exit 1 }
-
   } else {
     Write-Err "Script '$scriptName' introuvable."
     Write-Host ""
@@ -154,12 +170,17 @@ switch ($Command.ToLower()) {
       @("logs",                    "Tous les logs (Ctrl+C pour quitter)"),
       @("logs-api",                "Logs NestJS uniquement"),
       @("dns",                     "URLs + config Flutter"),
-      @("tunnel",                  "Cloudflare Quick Tunnel"),
       @("flutter-run",             "Lancer Flutter avec l'IP locale"),
       @("shell-api",               "Shell dans le conteneur NestJS"),
       @("shell-mongo",             "mongosh dans MongoDB"),
       @("test-api",                "Tester les endpoints"),
       @("clean",                   "Supprimer toutes les donnees (DESTRUCTIF)"),
+      @("",                        ""),
+      @("[TUNNEL — Acces distant]", ""),
+      @("tunnel",                  "Cloudflare Quick Tunnel (URL aleatoire)"),
+      @("ngrok",                   "Tunnel ngrok PERMANENT — recommande"),
+      @("ngrok-install",           "Installer ngrok"),
+      @("ngrok-reset",             "Changer token ou domaine ngrok"),
       @("",                        ""),
       @("[SCRIPTS]",               ""),
       @("scripts",                 "Tout executer (migrations + seeds)"),
@@ -266,30 +287,152 @@ switch ($Command.ToLower()) {
     Write-Host "  IP locale : $LOCAL_IP" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "  flutter run --dart-define=API_BASE_URL=http://$($LOCAL_IP):80" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Info "OU : collez l'URL Quick Tunnel dans Firebase Remote Config (cle : api_base_url)"
+
+    $ngrokDomain = Get-EnvValue "NGROK_DOMAIN"
+    if ($ngrokDomain -ne "") {
+      Write-Host ""
+      Write-Host "  Tunnel ngrok : https://$ngrokDomain" -ForegroundColor Green
+      Write-Host "  flutter run --dart-define=API_BASE_URL=https://$ngrokDomain" -ForegroundColor Cyan
+    } else {
+      Write-Host ""
+      Write-Info "OU : collez l'URL Quick Tunnel dans Firebase Remote Config (cle : api_base_url)"
+    }
     Write-Host ""
   }
 
-  # ── tunnel ──────────────────────────────────────────────────────────────────
+  # ── tunnel (Cloudflare) ─────────────────────────────────────────────────────
   "tunnel" {
-    Write-Header "Cloudflare Quick Tunnel (sans compte)"
-    Write-Host ""
-    Write-Host "  1) Une URL aleatoire https://xxx.trycloudflare.com va apparaitre" -ForegroundColor White
-    Write-Host "  2) Copiez-la" -ForegroundColor White
-    Write-Host "  3) Firebase Console -> Remote Config -> api_base_url -> coller -> Publier" -ForegroundColor White
-    Write-Host "  4) Relancez l'application Flutter" -ForegroundColor White
+    Write-Header "Cloudflare Quick Tunnel (URL aleatoire)"
     Write-Host ""
     Write-Host "  Ctrl+C pour arreter." -ForegroundColor Gray
+    Write-Host "  Pour une URL permanente : .\khidmeti.ps1 ngrok" -ForegroundColor Yellow
     Write-Host ""
     $cf = Get-Command cloudflared -ErrorAction SilentlyContinue
     if (-not $cf) {
       Write-Err "cloudflared introuvable."
       Write-Info "https://github.com/cloudflare/cloudflared/releases/latest"
-      Write-Info "Telecharger cloudflared-windows-amd64.exe, renommer en cloudflared.exe, ajouter au PATH"
       exit 1
     }
     cloudflared tunnel --url http://localhost:80
+  }
+
+  # ══════════════════════════════════════════════════════════════════════════════
+  # TUNNEL NGROK — Domaine statique PERMANENT
+  #
+  #  Avantages :
+  #    ✅ URL identique a chaque redemarrage (ex: khidmeti-oran.ngrok-free.app)
+  #    ✅ Gratuit, sans carte bancaire
+  #    ✅ Token + domaine sauvegardes dans .env → saisis 1 seule fois
+  #
+  #  Premiere utilisation :
+  #    1. Compte sur https://dashboard.ngrok.com/signup
+  #    2. Domaine sur https://dashboard.ngrok.com/domains
+  #    3. .\khidmeti.ps1 ngrok  →  entrez token + domaine (1 seule fois)
+  #
+  #  Utilisations suivantes :
+  #    .\khidmeti.ps1 ngrok  →  demarre directement
+  # ══════════════════════════════════════════════════════════════════════════════
+
+  "ngrok-install" {
+    Write-Header "Installation de ngrok (Windows)"
+    Write-Host ""
+
+    $ngrokCmd = Get-Command ngrok -ErrorAction SilentlyContinue
+    if ($ngrokCmd) {
+      Write-Ok "ngrok deja installe : $(ngrok --version)"
+    } else {
+      Write-Info "Telechargement de ngrok..."
+      $zipPath = "$env:TEMP\ngrok.zip"
+      $destPath = "C:\ngrok"
+      try {
+        Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" `
+          -OutFile $zipPath -UseBasicParsing
+        if (-not (Test-Path $destPath)) { New-Item -ItemType Directory -Path $destPath -Force | Out-Null }
+        Expand-Archive -Path $zipPath -DestinationPath $destPath -Force
+        Remove-Item $zipPath -ErrorAction SilentlyContinue
+        Write-Ok "ngrok extrait dans $destPath"
+        Write-Host ""
+        Write-Host "  IMPORTANT : ajoutez $destPath a votre PATH :" -ForegroundColor Yellow
+        Write-Host "  (ou lancez cette commande PowerShell en admin)" -ForegroundColor Gray
+        Write-Host '  [System.Environment]::SetEnvironmentVariable("PATH", $env:PATH+";C:\ngrok", "Machine")' -ForegroundColor Cyan
+      } catch {
+        Write-Err "Echec telechargement : $_"
+        Write-Info "Telechargez manuellement : https://ngrok.com/download"
+      }
+    }
+
+    Write-Host ""
+    Write-Info "Etapes suivantes :"
+    Write-Info "  1. Compte gratuit (sans CB) : https://dashboard.ngrok.com/signup"
+    Write-Info "  2. Token  : https://dashboard.ngrok.com/get-started/your-authtoken"
+    Write-Info "  3. Domaine : https://dashboard.ngrok.com/domains"
+    Write-Info "  4. .\khidmeti.ps1 ngrok"
+    Write-Host ""
+  }
+
+  "ngrok" {
+    Write-Header "Tunnel ngrok — Domaine statique permanent"
+    Write-Host ""
+
+    # ── Vérifier que ngrok est installé ──────────────────────────────────────
+    $ngrokCmd = Get-Command ngrok -ErrorAction SilentlyContinue
+    if (-not $ngrokCmd) {
+      Write-Err "ngrok introuvable."
+      Write-Info "Lancez d'abord : .\khidmeti.ps1 ngrok-install"
+      Write-Host ""
+      exit 1
+    }
+
+    # ── Lire / saisir NGROK_AUTH_TOKEN ────────────────────────────────────────
+    $ngrokToken = Get-EnvValue "NGROK_AUTH_TOKEN"
+    if ($ngrokToken -eq "") {
+      Write-Host "  ┌─────────────────────────────────────────────────────┐" -ForegroundColor Cyan
+      Write-Host "  │  Etape 1/2 — Auth Token ngrok                       │" -ForegroundColor Cyan
+      Write-Host "  │  https://dashboard.ngrok.com/get-started/your-authtoken │" -ForegroundColor Cyan
+      Write-Host "  └─────────────────────────────────────────────────────┘" -ForegroundColor Cyan
+      Write-Host ""
+      $ngrokToken = Read-Host "  Collez votre Auth Token"
+      Set-EnvValue "NGROK_AUTH_TOKEN" $ngrokToken
+      Write-Ok "Token sauvegarde dans .env"
+      Write-Host ""
+    }
+
+    # Configurer le token
+    ngrok config add-authtoken $ngrokToken 2>$null | Out-Null
+
+    # ── Lire / saisir NGROK_DOMAIN ────────────────────────────────────────────
+    $ngrokDomain = Get-EnvValue "NGROK_DOMAIN"
+    if ($ngrokDomain -eq "") {
+      Write-Host "  ┌─────────────────────────────────────────────────────┐" -ForegroundColor Cyan
+      Write-Host "  │  Etape 2/2 — Domaine statique ngrok                 │" -ForegroundColor Cyan
+      Write-Host "  │  Reservez-en un : https://dashboard.ngrok.com/domains │" -ForegroundColor Cyan
+      Write-Host "  │  Exemple : khidmeti-oran.ngrok-free.app             │" -ForegroundColor Cyan
+      Write-Host "  └─────────────────────────────────────────────────────┘" -ForegroundColor Cyan
+      Write-Host ""
+      $ngrokDomain = Read-Host "  Entrez votre domaine statique"
+      Set-EnvValue "NGROK_DOMAIN" $ngrokDomain
+      Write-Ok "Domaine sauvegarde dans .env (ne sera plus demande)"
+      Write-Host ""
+    }
+
+    # ── Démarrer le tunnel ─────────────────────────────────────────────────────
+    Write-Host "  Demarrage du tunnel..." -ForegroundColor White
+    Write-Host ""
+    Write-Host "  URL permanente : https://$ngrokDomain" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  flutter run --dart-define=API_BASE_URL=https://$ngrokDomain" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Info "  → Copiez cette URL dans Firebase Remote Config (cle : api_base_url)"
+    Write-Info "  → Ctrl+C pour arreter"
+    Write-Host ""
+
+    ngrok http "--domain=$ngrokDomain" 80
+  }
+
+  "ngrok-reset" {
+    Remove-EnvValue "NGROK_AUTH_TOKEN"
+    Remove-EnvValue "NGROK_DOMAIN"
+    Write-Ok "Config ngrok supprimee de .env — relancez : .\khidmeti.ps1 ngrok"
   }
 
   # ── flutter-run ─────────────────────────────────────────────────────────────
@@ -331,7 +474,6 @@ switch ($Command.ToLower()) {
     & $PSCommandPath scripts-seeds
   }
 
-  # ── scripts-migrations ──────────────────────────────────────────────────────
   "scripts-migrations" {
     Write-Header "Migrations MongoDB"
     $files = Get-ChildItem "scripts\migrations\*.js" -ErrorAction SilentlyContinue
@@ -352,7 +494,6 @@ switch ($Command.ToLower()) {
     if ($failed -gt 0) { exit 1 }
   }
 
-  # ── scripts-seeds ───────────────────────────────────────────────────────────
   "scripts-seeds" {
     Write-Header "Seeds TypeScript"
     $files = Get-ChildItem "apps\api\src\scripts\seeds\*.ts" -ErrorAction SilentlyContinue

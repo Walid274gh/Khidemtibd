@@ -44,6 +44,7 @@ ARGS ?=
         shell-redis shell-minio shell-qdrant mongo-stats redis-info redis-flush \
         clean-logs clean prod-start prod-update \
         tunnel-install tunnel-quick tunnel-stop tunnel-status flutter-run \
+        ngrok ngrok-install ngrok-reset \
         scripts scripts-migrations scripts-seeds
 
 ## ══════════════════════════════════════════════════════════════════════════════
@@ -83,9 +84,12 @@ help: ## Afficher l'aide
 	@echo "  dns                URLs + config Flutter"
 	@echo ""
 	@echo "  [TUNNEL — Codespaces / WiFi distant]"
-	@echo "  tunnel-quick       Quick Tunnel (URL aléatoire trycloudflare.com)"
+	@echo "  tunnel-quick       Quick Tunnel Cloudflare (URL aléatoire)"
 	@echo "  tunnel-install     Installer cloudflared"
-	@echo "  tunnel-stop        Arrêter le tunnel"
+	@echo "  tunnel-stop        Arrêter le tunnel Cloudflare"
+	@echo "  ngrok              Tunnel ngrok domaine PERMANENT (recommandé)"
+	@echo "  ngrok-install      Installer ngrok"
+	@echo "  ngrok-reset        Réinitialiser token/domaine ngrok"
 	@echo "  flutter-run        Lancer Flutter avec l'IP locale"
 	@echo ""
 	@echo "  [IA]"
@@ -278,9 +282,16 @@ dns: ## Afficher les URLs + config Flutter
 	@echo ""
 	@echo "  flutter run --dart-define=API_BASE_URL=http://$(LOCAL_IP):80"
 	@echo ""
-	@echo "  OU : collez l'URL Quick Tunnel dans Firebase Remote Config"
-	@echo "       clé : api_base_url"
-	@echo ""
+	@NGROK_DOMAIN=$$(grep '^NGROK_DOMAIN=' .env 2>/dev/null | cut -d= -f2- | tr -d '[:space:]' | tr -d '"'); \
+	if [ -n "$$NGROK_DOMAIN" ]; then \
+		echo "  Tunnel ngrok actif : https://$$NGROK_DOMAIN"; \
+		echo "  flutter run --dart-define=API_BASE_URL=https://$$NGROK_DOMAIN"; \
+		echo ""; \
+	else \
+		echo "  OU : collez l'URL Quick Tunnel dans Firebase Remote Config"; \
+		echo "       clé : api_base_url"; \
+		echo ""; \
+	fi
 
 ## ══════════════════════════════════════════════════════════════════════════════
 ## TUNNEL CLOUDFLARE
@@ -302,20 +313,131 @@ tunnel-install: ## Installer cloudflared
 	fi
 	@cloudflared --version || echo "⚠️  Relancez votre terminal."
 
-tunnel-quick: ## Lancer un Quick Tunnel
+tunnel-quick: ## Lancer un Quick Tunnel (URL aléatoire — change à chaque redémarrage)
 	@echo ""
 	@echo "  CTRL+C pour arrêter le tunnel."
+	@echo "  💡 Pour un URL permanent : make ngrok"
 	@echo ""
 	@cloudflared tunnel --url http://localhost:80
 
-tunnel-stop: ## Arrêter le tunnel
+tunnel-stop: ## Arrêter le tunnel Cloudflare
 	@pkill -f 'cloudflared tunnel' 2>/dev/null && echo "✅ Tunnel(s) arrêté(s)." || echo "Aucun tunnel actif."
 
-tunnel-status: ## État du tunnel
+tunnel-status: ## État du tunnel Cloudflare
 	@ps aux | grep 'cloudflared tunnel' | grep -v grep || echo "Aucun tunnel actif."
 
 flutter-run: ## Lancer Flutter avec l'IP locale
 	@flutter run --dart-define=API_BASE_URL=http://$(LOCAL_IP):80
+
+## ══════════════════════════════════════════════════════════════════════════════
+## TUNNEL NGROK — Domaine statique PERMANENT (recommandé)
+##
+##  Avantages vs Cloudflare Quick Tunnel :
+##    ✅ URL identique à chaque redémarrage (ex: mon-app.ngrok-free.app)
+##    ✅ Gratuit, sans carte bancaire (compte ngrok.com suffit)
+##    ✅ Token + domaine sauvegardés dans .env → 1 seul mot à retaper
+##
+##  Première utilisation :
+##    1. Créez un compte sur https://dashboard.ngrok.com/signup
+##    2. Réservez un domaine sur https://dashboard.ngrok.com/domains
+##    3. make ngrok  →  entrez token + domaine (1 seule fois)
+##
+##  Utilisations suivantes :
+##    make ngrok  →  démarre directement
+## ══════════════════════════════════════════════════════════════════════════════
+
+ngrok-install: ## Installer ngrok (Linux / macOS / WSL)
+	@echo "Installation de ngrok..."
+	@if command -v ngrok >/dev/null 2>&1; then \
+		echo "✅ ngrok déjà installé : $$(ngrok --version)"; \
+	elif [ -f /etc/debian_version ] || grep -qi ubuntu /etc/os-release 2>/dev/null; then \
+		curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
+		  | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null 2>&1; \
+		echo "deb https://ngrok-agent.s3.amazonaws.com buster main" \
+		  | sudo tee /etc/apt/sources.list.d/ngrok.list >/dev/null; \
+		sudo apt-get update -qq && sudo apt-get install -y ngrok; \
+	elif command -v brew >/dev/null 2>&1; then \
+		brew install ngrok/ngrok/ngrok; \
+	else \
+		echo "  Téléchargement manuel de ngrok..."; \
+		curl -sL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz \
+		  | sudo tar xz -C /usr/local/bin; \
+	fi
+	@echo ""
+	@ngrok --version 2>/dev/null || echo "⚠️  Relancez votre terminal si ngrok est introuvable."
+	@echo ""
+	@echo "  Étapes suivantes :"
+	@echo "  1. Compte gratuit (sans CB) : https://dashboard.ngrok.com/signup"
+	@echo "  2. Token         : https://dashboard.ngrok.com/get-started/your-authtoken"
+	@echo "  3. Domaine       : https://dashboard.ngrok.com/domains"
+	@echo "  4. make ngrok"
+	@echo ""
+
+ngrok: ## Lancer le tunnel ngrok avec domaine statique permanent
+	@echo ""
+	@echo "══════════════════════════════════════════════"
+	@echo "  Tunnel ngrok — Domaine statique permanent"
+	@echo "══════════════════════════════════════════════"
+	@echo ""
+	@# ── Vérifier que ngrok est installé ────────────────────────────────────
+	@if ! command -v ngrok >/dev/null 2>&1; then \
+		echo "  ❌ ngrok introuvable."; \
+		echo "  Lancez d'abord : make ngrok-install"; \
+		echo ""; exit 1; \
+	fi
+	@# ── Lire / saisir NGROK_AUTH_TOKEN ─────────────────────────────────────
+	@NGROK_TOKEN=$$(grep '^NGROK_AUTH_TOKEN=' .env 2>/dev/null | cut -d= -f2- | tr -d '[:space:]' | tr -d '"'); \
+	if [ -z "$$NGROK_TOKEN" ]; then \
+		echo "  ┌─────────────────────────────────────────────────────┐"; \
+		echo "  │  Étape 1/2 — Auth Token ngrok                       │"; \
+		echo "  │  https://dashboard.ngrok.com/get-started/your-authtoken │"; \
+		echo "  └─────────────────────────────────────────────────────┘"; \
+		echo ""; \
+		read -p "  Collez votre Auth Token : " NGROK_TOKEN; \
+		if grep -q '^NGROK_AUTH_TOKEN=' .env 2>/dev/null; then \
+			$(SED_I) "s|^NGROK_AUTH_TOKEN=.*|NGROK_AUTH_TOKEN=$$NGROK_TOKEN|" .env; \
+		else \
+			printf '\n# ── ngrok ────────────────────────────────────────────────────────────────\n' >> .env; \
+			echo "NGROK_AUTH_TOKEN=$$NGROK_TOKEN" >> .env; \
+		fi; \
+		echo "  ✅ Token sauvegardé dans .env"; \
+		echo ""; \
+	fi; \
+	ngrok config add-authtoken "$$NGROK_TOKEN" 2>/dev/null; \
+	NGROK_DOMAIN=$$(grep '^NGROK_DOMAIN=' .env 2>/dev/null | cut -d= -f2- | tr -d '[:space:]' | tr -d '"'); \
+	if [ -z "$$NGROK_DOMAIN" ]; then \
+		echo "  ┌─────────────────────────────────────────────────────┐"; \
+		echo "  │  Étape 2/2 — Domaine statique ngrok                 │"; \
+		echo "  │  Réservez-en un sur : https://dashboard.ngrok.com/domains │"; \
+		echo "  │  Exemple : khidmeti-oran.ngrok-free.app             │"; \
+		echo "  └─────────────────────────────────────────────────────┘"; \
+		echo ""; \
+		read -p "  Entrez votre domaine statique : " NGROK_DOMAIN; \
+		if grep -q '^NGROK_DOMAIN=' .env 2>/dev/null; then \
+			$(SED_I) "s|^NGROK_DOMAIN=.*|NGROK_DOMAIN=$$NGROK_DOMAIN|" .env; \
+		else \
+			echo "NGROK_DOMAIN=$$NGROK_DOMAIN" >> .env; \
+		fi; \
+		echo "  ✅ Domaine sauvegardé dans .env (ne sera plus demandé)"; \
+		echo ""; \
+	fi; \
+	NGROK_DOMAIN=$$(grep '^NGROK_DOMAIN=' .env | cut -d= -f2- | tr -d '[:space:]' | tr -d '"'); \
+	echo "  🚀 Démarrage du tunnel..."; \
+	echo ""; \
+	echo "  URL permanente : https://$$NGROK_DOMAIN"; \
+	echo ""; \
+	echo "  flutter run --dart-define=API_BASE_URL=https://$$NGROK_DOMAIN"; \
+	echo ""; \
+	echo "  → Collez cette URL dans Firebase Remote Config (clé : api_base_url)"; \
+	echo "  → Ctrl+C pour arrêter"; \
+	echo ""; \
+	ngrok http --domain="$$NGROK_DOMAIN" 80
+
+ngrok-reset: ## Réinitialiser la config ngrok (changer token ou domaine)
+	@$(SED_I) '/^NGROK_AUTH_TOKEN=/d' .env 2>/dev/null; \
+	$(SED_I) '/^NGROK_DOMAIN=/d' .env 2>/dev/null; \
+	$(SED_I) '/^# ── ngrok/d' .env 2>/dev/null; \
+	echo "✅ Config ngrok supprimée — relancez : make ngrok"
 
 ## ══════════════════════════════════════════════════════════════════════════════
 ## GESTION DE L'IA
@@ -348,20 +470,6 @@ ollama-pull: ## Télécharger les modèles Ollama
 
 ## ══════════════════════════════════════════════════════════════════════════════
 ## SCRIPTS — Migrations MongoDB + Seeds TypeScript
-##
-## Convention :
-##   scripts/migrations/*.js          → exécutés via mongosh dans khidmeti-mongo
-##   apps/api/src/scripts/seeds/*.ts  → exécutés via ts-node dans khidmeti-api
-##
-## Aucune installation locale requise (tout tourne dans les conteneurs Docker).
-##
-## Exemples :
-##   make scripts                              ← tout exécuter
-##   make scripts-migrations                   ← migrations seulement
-##   make scripts-seeds                        ← seeds seulement
-##   make scripts-001_phone_auth_indexes       ← une migration précise
-##   make scripts-seed-workers                 ← un seed précis
-##   make scripts-seed-workers ARGS=--clear    ← seed avec flag --clear
 ## ══════════════════════════════════════════════════════════════════════════════
 
 scripts: ## Exécuter TOUTES les migrations puis TOUS les seeds
@@ -421,10 +529,6 @@ scripts-seeds: ## Exécuter tous les seeds (apps/api/src/scripts/seeds/*.ts)
 	fi
 	@echo ""
 
-# ── Script individuel (pattern rule) ─────────────────────────────────────────
-# Cherche d'abord dans migrations/*.js, puis dans seeds/*.ts
-# Ex: make scripts-001_phone_auth_indexes
-#     make scripts-seed-workers ARGS=--clear
 scripts-%:
 	@NAME=$*; \
 	if [ -f "scripts/migrations/$$NAME.js" ]; then \

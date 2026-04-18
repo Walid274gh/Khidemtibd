@@ -36,6 +36,9 @@ if /i "%CMD%"=="status"         goto :status
 if /i "%CMD%"=="logs"           goto :logs
 if /i "%CMD%"=="logs-api"       goto :logs_api
 if /i "%CMD%"=="tunnel"         goto :tunnel
+if /i "%CMD%"=="ngrok"          goto :ngrok
+if /i "%CMD%"=="ngrok-install"  goto :ngrok_install
+if /i "%CMD%"=="ngrok-reset"    goto :ngrok_reset
 if /i "%CMD%"=="flutter-run"    goto :flutter_run
 if /i "%CMD%"=="clean"          goto :clean
 if /i "%CMD%"=="dns"            goto :dns
@@ -76,12 +79,17 @@ echo   khidmeti.bat status             Statut des conteneurs
 echo   khidmeti.bat logs               Tous les logs (Ctrl+C pour quitter)
 echo   khidmeti.bat logs-api           Logs NestJS uniquement
 echo   khidmeti.bat dns                URLs + config Flutter
-echo   khidmeti.bat tunnel             Cloudflare Quick Tunnel
 echo   khidmeti.bat flutter-run        Lancer Flutter avec l'IP locale
 echo   khidmeti.bat shell-api          Shell dans le conteneur NestJS
 echo   khidmeti.bat shell-mongo        mongosh dans MongoDB
 echo   khidmeti.bat test-api           Tester les endpoints
 echo   khidmeti.bat clean              Supprimer toutes les donnees (DESTRUCTIF)
+echo.
+echo   [TUNNEL — Acces distant]
+echo   khidmeti.bat tunnel             Cloudflare Quick Tunnel (URL aleatoire)
+echo   khidmeti.bat ngrok              Tunnel ngrok PERMANENT (recommande)
+echo   khidmeti.bat ngrok-install      Installer ngrok
+echo   khidmeti.bat ngrok-reset        Changer token ou domaine ngrok
 echo.
 echo   [SCRIPTS — Migrations + Seeds]
 echo   khidmeti.bat scripts                        Tout executer
@@ -200,34 +208,148 @@ echo ═════════════════════════
 echo.
 echo   flutter run --dart-define=API_BASE_URL=http://%LOCAL_IP%:80
 echo.
-echo   OU : collez l'URL Quick Tunnel dans Firebase Remote Config
-echo        cle : api_base_url
-echo.
+:: Afficher le domaine ngrok s'il est configuré
+set NGROK_DOMAIN_DNS=
+for /f "tokens=2 delims==" %%a in ('findstr "^NGROK_DOMAIN=" .env 2^>nul') do set NGROK_DOMAIN_DNS=%%a
+if not "%NGROK_DOMAIN_DNS%"=="" (
+  echo   Tunnel ngrok : https://%NGROK_DOMAIN_DNS%
+  echo   flutter run --dart-define=API_BASE_URL=https://%NGROK_DOMAIN_DNS%
+  echo.
+) else (
+  echo   OU : collez l'URL Quick Tunnel dans Firebase Remote Config
+  echo        cle : api_base_url
+  echo.
+)
 goto :eof
 
-:: ── TUNNEL ────────────────────────────────────────────────────────────────────
+:: ── TUNNEL CLOUDFLARE ─────────────────────────────────────────────────────────
 :tunnel
 echo.
-echo ══════════════════════════════════════════════════════
-echo   Cloudflare Quick Tunnel (sans compte)
-echo ══════════════════════════════════════════════════════
-echo.
-echo   1) Une URL aleatoire https://xxx.trycloudflare.com va apparaitre
-echo   2) Copiez-la
-echo   3) Firebase Console -> Remote Config -> api_base_url -> coller -> Publier
-echo   4) Relancez l'application Flutter
-echo.
-echo   Ctrl+C pour arreter le tunnel.
-echo ══════════════════════════════════════════════════════
+echo   Ctrl+C pour arreter.  URL aleatoire — change a chaque demarrage.
+echo   Pour une URL permanente : khidmeti.bat ngrok
 echo.
 where cloudflared >nul 2>&1
 if %errorlevel% neq 0 (
   echo ERREUR : cloudflared introuvable.
   echo Telecharger : https://github.com/cloudflare/cloudflared/releases/latest
-  echo Renommer cloudflared-windows-amd64.exe en cloudflared.exe et ajouter au PATH
   exit /b 1
 )
 cloudflared tunnel --url http://localhost:80
+goto :eof
+
+:: ══════════════════════════════════════════════════════════════════════════════
+:: TUNNEL NGROK — Domaine statique PERMANENT
+:: ══════════════════════════════════════════════════════════════════════════════
+
+:ngrok_install
+echo.
+echo ══════════════════════════════════════════════
+echo   Installation de ngrok (Windows)
+echo ══════════════════════════════════════════════
+echo.
+where ngrok >nul 2>&1
+if %errorlevel% equ 0 (
+  echo   ngrok deja installe.
+  ngrok --version
+  goto :eof
+)
+echo   Telechargement de ngrok...
+curl -sL -o "%TEMP%\ngrok.zip" "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip"
+if %errorlevel% neq 0 (
+  echo   ERREUR : telechargement echoue.
+  echo   Telechargez manuellement : https://ngrok.com/download
+  goto :eof
+)
+powershell -Command "Expand-Archive -Path '%TEMP%\ngrok.zip' -DestinationPath 'C:\ngrok' -Force" >nul 2>&1
+echo.
+echo   ngrok extrait dans C:\ngrok\
+echo.
+echo   IMPORTANT : ajoutez C:\ngrok\ a votre variable PATH :
+echo   Panneau de configuration -^> Systeme -^> Variables d'environnement
+echo   OU ouvrez PowerShell en admin et tapez :
+echo   [System.Environment]::SetEnvironmentVariable('PATH', $env:PATH+';C:\ngrok', 'Machine')
+echo.
+echo   Etapes suivantes :
+echo   1. Compte gratuit (sans CB) : https://dashboard.ngrok.com/signup
+echo   2. Token         : https://dashboard.ngrok.com/get-started/your-authtoken
+echo   3. Domaine       : https://dashboard.ngrok.com/domains
+echo   4. khidmeti.bat ngrok
+echo.
+goto :eof
+
+:ngrok
+echo.
+echo ══════════════════════════════════════════════
+echo   Tunnel ngrok — Domaine statique permanent
+echo ══════════════════════════════════════════════
+echo.
+where ngrok >nul 2>&1
+if %errorlevel% neq 0 (
+  echo   ERREUR : ngrok introuvable.
+  echo   Lancez d'abord : khidmeti.bat ngrok-install
+  echo.
+  exit /b 1
+)
+
+:: ── Lire NGROK_AUTH_TOKEN depuis .env ────────────────────────────────────────
+set NGROK_TOKEN=
+for /f "tokens=2 delims==" %%a in ('findstr "^NGROK_AUTH_TOKEN=" .env 2^>nul') do set NGROK_TOKEN=%%a
+set NGROK_TOKEN=%NGROK_TOKEN: =%
+
+if "%NGROK_TOKEN%"=="" (
+  echo   Etape 1/2 — Auth Token ngrok
+  echo   Obtenez-le sur : https://dashboard.ngrok.com/get-started/your-authtoken
+  echo.
+  set /p NGROK_TOKEN="  Collez votre Auth Token : "
+  :: Sauvegarder dans .env
+  findstr /v "^NGROK_AUTH_TOKEN=" .env > .env.tmp 2>nul
+  echo NGROK_AUTH_TOKEN=!NGROK_TOKEN!>> .env.tmp
+  move /y .env.tmp .env >nul
+  echo   Token sauvegarde dans .env
+  echo.
+)
+
+:: Configurer ngrok
+ngrok config add-authtoken %NGROK_TOKEN% >nul 2>&1
+
+:: ── Lire NGROK_DOMAIN depuis .env ────────────────────────────────────────────
+set NGROK_DOMAIN=
+for /f "tokens=2 delims==" %%a in ('findstr "^NGROK_DOMAIN=" .env 2^>nul') do set NGROK_DOMAIN=%%a
+set NGROK_DOMAIN=%NGROK_DOMAIN: =%
+
+if "%NGROK_DOMAIN%"=="" (
+  echo   Etape 2/2 — Domaine statique ngrok
+  echo   Reservez-en un sur : https://dashboard.ngrok.com/domains
+  echo   Exemple : khidmeti-oran.ngrok-free.app
+  echo.
+  set /p NGROK_DOMAIN="  Entrez votre domaine statique : "
+  :: Sauvegarder dans .env
+  findstr /v "^NGROK_DOMAIN=" .env > .env.tmp 2>nul
+  echo NGROK_DOMAIN=!NGROK_DOMAIN!>> .env.tmp
+  move /y .env.tmp .env >nul
+  echo   Domaine sauvegarde dans .env (ne sera plus demande^)
+  echo.
+)
+
+echo   Demarrage du tunnel...
+echo.
+echo   URL permanente : https://%NGROK_DOMAIN%
+echo.
+echo   flutter run --dart-define=API_BASE_URL=https://%NGROK_DOMAIN%
+echo.
+echo   -^> Copiez cette URL dans Firebase Remote Config (cle : api_base_url^)
+echo   -^> Ctrl+C pour arreter
+echo.
+ngrok http --domain=%NGROK_DOMAIN% 80
+goto :eof
+
+:ngrok_reset
+:: Supprimer NGROK_AUTH_TOKEN et NGROK_DOMAIN du .env
+findstr /v "^NGROK_AUTH_TOKEN=" .env > .env.tmp 2>nul
+move /y .env.tmp .env >nul
+findstr /v "^NGROK_DOMAIN=" .env > .env.tmp 2>nul
+move /y .env.tmp .env >nul
+echo Config ngrok supprimee — relancez : khidmeti.bat ngrok
 goto :eof
 
 :: ── FLUTTER RUN ───────────────────────────────────────────────────────────────
@@ -267,7 +389,6 @@ goto :eof
 :: SCRIPTS — Migrations + Seeds
 :: ══════════════════════════════════════════════════════════════════════════════
 
-:: ── Tout executer ─────────────────────────────────────────────────────────────
 :scripts
 echo.
 echo ══════════════════════════════════════════════
@@ -277,27 +398,21 @@ call :scripts_migrations
 call :scripts_seeds
 goto :eof
 
-:: ── Toutes les migrations ──────────────────────────────────────────────────────
 :scripts_migrations
 echo.
 echo ══════════════════════════════════════════════
 echo   Migrations MongoDB
 echo ══════════════════════════════════════════════
 echo.
-
-:: Lire les credentials MongoDB depuis .env
 for /f "tokens=2 delims==" %%a in ('findstr "^MONGO_ROOT_USER" .env 2^>nul') do set MIG_MONGO_USER=%%a
 for /f "tokens=2 delims==" %%a in ('findstr "^MONGO_ROOT_PASSWORD" .env 2^>nul') do set MIG_MONGO_PASS=%%a
-
 set MIG_COUNT=0
 set MIG_FAILED=0
-
 if not exist "scripts\migrations\*.js" (
   echo   Aucune migration trouvee dans scripts\migrations\
   echo.
   goto :migrations_done
 )
-
 for %%f in (scripts\migrations\*.js) do (
   echo   ^> %%~nxf
   docker exec -i khidmeti-mongo mongosh --quiet ^
@@ -312,30 +427,25 @@ for %%f in (scripts\migrations\*.js) do (
   )
   echo.
 )
-
 :migrations_done
 echo   Resultat : %MIG_COUNT% OK  ^|  %MIG_FAILED% echec(s)
 echo.
 if %MIG_FAILED% gtr 0 exit /b 1
 goto :eof
 
-:: ── Tous les seeds ─────────────────────────────────────────────────────────────
 :scripts_seeds
 echo.
 echo ══════════════════════════════════════════════
 echo   Seeds TypeScript
 echo ══════════════════════════════════════════════
 echo.
-
 set SEED_COUNT=0
 set SEED_FAILED=0
-
 if not exist "apps\api\src\scripts\seeds\*.ts" (
   echo   Aucun seed trouve dans apps\api\src\scripts\seeds\
   echo.
   goto :seeds_done
 )
-
 for %%f in (apps\api\src\scripts\seeds\*.ts) do (
   echo   ^> %%~nxf %ARGS%
   docker exec khidmeti-api ^
@@ -349,17 +459,14 @@ for %%f in (apps\api\src\scripts\seeds\*.ts) do (
   )
   echo.
 )
-
 :seeds_done
 echo   Resultat : %SEED_COUNT% OK  ^|  %SEED_FAILED% echec(s)
 echo.
 if %SEED_FAILED% gtr 0 exit /b 1
 goto :eof
 
-:: ── Script individuel ─────────────────────────────────────────────────────────
 :scripts_one
 echo.
-:: Chercher d'abord dans migrations
 if exist "scripts\migrations\%SCRIPT_NAME%.js" (
   echo   ^> Migration : %SCRIPT_NAME%.js
   echo.
@@ -379,8 +486,6 @@ if exist "scripts\migrations\%SCRIPT_NAME%.js" (
   echo.
   goto :eof
 )
-
-:: Chercher dans seeds
 if exist "apps\api\src\scripts\seeds\%SCRIPT_NAME%.ts" (
   echo   ^> Seed : %SCRIPT_NAME%.ts %ARGS%
   echo.
@@ -397,27 +502,11 @@ if exist "apps\api\src\scripts\seeds\%SCRIPT_NAME%.ts" (
   echo.
   goto :eof
 )
-
-:: Script non trouve
 echo   ERREUR : Script '%SCRIPT_NAME%' introuvable.
 echo.
 echo   Cherche dans :
 echo     scripts\migrations\%SCRIPT_NAME%.js
 echo     apps\api\src\scripts\seeds\%SCRIPT_NAME%.ts
-echo.
-echo   Scripts disponibles :
-echo   Migrations :
-if exist "scripts\migrations\*.js" (
-  for %%f in (scripts\migrations\*.js) do echo     %%~nf
-) else (
-  echo     (aucune)
-)
-echo   Seeds :
-if exist "apps\api\src\scripts\seeds\*.ts" (
-  for %%f in (apps\api\src\scripts\seeds\*.ts) do echo     %%~nf
-) else (
-  echo     (aucun)
-)
 echo.
 exit /b 1
 
