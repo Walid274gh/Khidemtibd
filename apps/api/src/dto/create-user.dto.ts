@@ -1,3 +1,10 @@
+// apps/api/src/dto/create-user.dto.ts
+//
+// FIX Bug 1 (defensive): @Transform يحوّل '' إلى undefined قبل التحقق.
+// @IsOptional() يتجاهل null/undefined فقط — لا يتجاهل السلسلة الفارغة ''.
+// بدون هذا الـ transform، يُفشل @IsEmail() على '' رغم @IsOptional().
+
+import { Transform } from 'class-transformer';
 import {
   IsString, IsEmail, IsOptional, IsNumber, IsNotEmpty,
   IsEnum, Matches, MinLength, MaxLength, Min, Max,
@@ -16,9 +23,13 @@ export class CreateUserDto {
   name: string;
 
   /**
-   * Email optionnel — les utilisateurs Phone Auth peuvent ne pas en avoir.
-   * Laisser vide ('') ou omettre pour un profil téléphone uniquement.
+   * FIX: @Transform يحوّل '' إلى undefined قبل تشغيل @IsEmail().
+   * ضروري لمستخدمي Phone Auth الذين لا يملكون email.
+   * بدونه: email='' → @IsOptional() لا يتجاهله → @IsEmail() يفشل → 400.
    */
+  @Transform(({ value }: { value: unknown }) =>
+    value === '' || value === null ? undefined : value
+  )
   @IsEmail()
   @IsOptional()
   email?: string;
@@ -29,9 +40,7 @@ export class CreateUserDto {
   role?: UserRole;
 
   /**
-   * Numéro de téléphone algérien — format E.164 (+213XXXXXXXXX)
-   * ou format local (0[5-7]XXXXXXXX).
-   * Sera stocké en E.164 après normalisation côté service.
+   * Algerian phone number E.164 (+213XXXXXXXXX) or local (0[5-7]XXXXXXXX).
    */
   @IsString()
   @IsOptional()
