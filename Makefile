@@ -31,6 +31,9 @@ LOCAL_IP := $(shell \
 HOST     := $(shell hostname)
 DATETIME := $(shell date +%Y%m%d-%H%M%S)
 
+## Paramètre optionnel transmis aux scripts (ex: ARGS=--clear)
+ARGS ?=
+
 .DEFAULT_GOAL := help
 .PHONY: help start start-local start-gpu stop restart build rebuild logs logs-api \
         logs-mongo logs-redis logs-qdrant logs-minio logs-nginx logs-mongo-ui \
@@ -40,7 +43,8 @@ DATETIME := $(shell date +%Y%m%d-%H%M%S)
         firewall backup backup-mongo restore list-backups shell-api shell-mongo \
         shell-redis shell-minio shell-qdrant mongo-stats redis-info redis-flush \
         clean-logs clean prod-start prod-update \
-        tunnel-install tunnel-quick tunnel-stop tunnel-status flutter-run
+        tunnel-install tunnel-quick tunnel-stop tunnel-status flutter-run \
+        scripts scripts-migrations scripts-seeds
 
 ## ══════════════════════════════════════════════════════════════════════════════
 ## AIDE
@@ -90,6 +94,19 @@ help: ## Afficher l'aide
 	@echo "  ai-switch-ollama      Basculer sur Ollama (local)"
 	@echo "  ai-switch-vllm        Basculer sur vLLM (GPU)"
 	@echo "  ollama-pull           Télécharger les modèles Ollama"
+	@echo ""
+	@echo "  [SCRIPTS — Migrations + Seeds]"
+	@echo "  scripts                     Exécuter TOUTES migrations + seeds"
+	@echo "  scripts-migrations          Exécuter toutes les migrations"
+	@echo "  scripts-seeds               Exécuter tous les seeds"
+	@echo "  scripts-<nom>               Exécuter UN script précis"
+	@echo "  scripts-seed-workers        Seed workers test Oran"
+	@echo "  scripts-seed-workers ARGS=--clear   Re-seed propre"
+	@echo "  scripts-001_phone_auth_indexes      Migration index auth"
+	@echo ""
+	@echo "  ── Structure attendue :"
+	@echo "     scripts/migrations/*.js          → mongosh (MongoDB)"
+	@echo "     apps/api/src/scripts/seeds/*.ts  → ts-node (NestJS container)"
 	@echo ""
 	@echo "  [MINIO]"
 	@echo "  minio-buckets      Recréer les buckets MinIO"
@@ -328,6 +345,121 @@ ollama-pull: ## Télécharger les modèles Ollama
 	@docker exec khidmeti-ollama ollama pull gemma4:e2b
 	@docker exec khidmeti-ollama ollama pull nomic-embed-text
 	@echo "✅ Modèles téléchargés."
+
+## ══════════════════════════════════════════════════════════════════════════════
+## SCRIPTS — Migrations MongoDB + Seeds TypeScript
+##
+## Convention :
+##   scripts/migrations/*.js          → exécutés via mongosh dans khidmeti-mongo
+##   apps/api/src/scripts/seeds/*.ts  → exécutés via ts-node dans khidmeti-api
+##
+## Aucune installation locale requise (tout tourne dans les conteneurs Docker).
+##
+## Exemples :
+##   make scripts                              ← tout exécuter
+##   make scripts-migrations                   ← migrations seulement
+##   make scripts-seeds                        ← seeds seulement
+##   make scripts-001_phone_auth_indexes       ← une migration précise
+##   make scripts-seed-workers                 ← un seed précis
+##   make scripts-seed-workers ARGS=--clear    ← seed avec flag --clear
+## ══════════════════════════════════════════════════════════════════════════════
+
+scripts: ## Exécuter TOUTES les migrations puis TOUS les seeds
+	@$(MAKE) scripts-migrations
+	@$(MAKE) scripts-seeds
+
+scripts-migrations: ## Exécuter toutes les migrations (scripts/migrations/*.js)
+	@echo ""
+	@echo "══════════════════════════════════════════════"
+	@echo "  Migrations MongoDB"
+	@echo "══════════════════════════════════════════════"
+	@MONGO_USER=$$(grep '^MONGO_ROOT_USER' .env | cut -d= -f2 | tr -d '[:space:]'); \
+	MONGO_PASS=$$(grep '^MONGO_ROOT_PASSWORD' .env | cut -d= -f2 | tr -d '[:space:]'); \
+	COUNT=0; FAILED=0; \
+	shopt -s nullglob; \
+	FILES=(scripts/migrations/*.js); \
+	if [ $${#FILES[@]} -eq 0 ]; then \
+	  echo "  ⚪ Aucune migration trouvée dans scripts/migrations/"; \
+	else \
+	  for f in "$${FILES[@]}"; do \
+	    echo "  → $$(basename $$f)"; \
+	    docker exec -i khidmeti-mongo mongosh \
+	      --quiet \
+	      -u "$$MONGO_USER" -p "$$MONGO_PASS" \
+	      --authenticationDatabase admin khidmeti < "$$f" \
+	    && { echo "  ✅ $$(basename $$f) OK"; COUNT=$$((COUNT+1)); } \
+	    || { echo "  ❌ $$(basename $$f) FAILED"; FAILED=$$((FAILED+1)); }; \
+	  done; \
+	  echo ""; \
+	  echo "  ✅ $$COUNT migration(s) OK  |  ❌ $$FAILED échec(s)"; \
+	  [ $$FAILED -gt 0 ] && exit 1 || true; \
+	fi
+	@echo ""
+
+scripts-seeds: ## Exécuter tous les seeds (apps/api/src/scripts/seeds/*.ts)
+	@echo ""
+	@echo "══════════════════════════════════════════════"
+	@echo "  Seeds TypeScript"
+	@echo "══════════════════════════════════════════════"
+	@COUNT=0; FAILED=0; \
+	shopt -s nullglob; \
+	FILES=(apps/api/src/scripts/seeds/*.ts); \
+	if [ $${#FILES[@]} -eq 0 ]; then \
+	  echo "  ⚪ Aucun seed trouvé dans apps/api/src/scripts/seeds/"; \
+	else \
+	  for f in "$${FILES[@]}"; do \
+	    NAME=$$(basename "$$f"); \
+	    echo "  → $$NAME $(ARGS)"; \
+	    docker exec khidmeti-api \
+	      npx ts-node --project tsconfig.json "src/scripts/seeds/$$NAME" $(ARGS) \
+	    && { echo "  ✅ $$NAME OK"; COUNT=$$((COUNT+1)); } \
+	    || { echo "  ❌ $$NAME FAILED"; FAILED=$$((FAILED+1)); }; \
+	  done; \
+	  echo ""; \
+	  echo "  ✅ $$COUNT seed(s) OK  |  ❌ $$FAILED échec(s)"; \
+	  [ $$FAILED -gt 0 ] && exit 1 || true; \
+	fi
+	@echo ""
+
+# ── Script individuel (pattern rule) ─────────────────────────────────────────
+# Cherche d'abord dans migrations/*.js, puis dans seeds/*.ts
+# Ex: make scripts-001_phone_auth_indexes
+#     make scripts-seed-workers ARGS=--clear
+scripts-%:
+	@NAME=$*; \
+	if [ -f "scripts/migrations/$$NAME.js" ]; then \
+	  MONGO_USER=$$(grep '^MONGO_ROOT_USER' .env | cut -d= -f2 | tr -d '[:space:]'); \
+	  MONGO_PASS=$$(grep '^MONGO_ROOT_PASSWORD' .env | cut -d= -f2 | tr -d '[:space:]'); \
+	  echo ""; \
+	  echo "  → Migration : $$NAME.js"; \
+	  docker exec -i khidmeti-mongo mongosh \
+	    --quiet \
+	    -u "$$MONGO_USER" -p "$$MONGO_PASS" \
+	    --authenticationDatabase admin khidmeti < "scripts/migrations/$$NAME.js" \
+	  && echo "  ✅ $$NAME.js OK" || { echo "  ❌ $$NAME.js FAILED"; exit 1; }; \
+	  echo ""; \
+	elif [ -f "apps/api/src/scripts/seeds/$$NAME.ts" ]; then \
+	  echo ""; \
+	  echo "  → Seed : $$NAME.ts $(ARGS)"; \
+	  docker exec khidmeti-api \
+	    npx ts-node --project tsconfig.json "src/scripts/seeds/$$NAME.ts" $(ARGS) \
+	  && echo "  ✅ $$NAME.ts OK" || { echo "  ❌ $$NAME.ts FAILED"; exit 1; }; \
+	  echo ""; \
+	else \
+	  echo ""; \
+	  echo "  ❌ Script '$$NAME' introuvable."; \
+	  echo "     Cherché dans :"; \
+	  echo "       scripts/migrations/$$NAME.js"; \
+	  echo "       apps/api/src/scripts/seeds/$$NAME.ts"; \
+	  echo ""; \
+	  echo "  Scripts disponibles :"; \
+	  echo "    Migrations :"; \
+	  ls scripts/migrations/*.js 2>/dev/null | xargs -I{} basename {} .js | sed 's/^/      /' || echo "      (aucune)"; \
+	  echo "    Seeds :"; \
+	  ls apps/api/src/scripts/seeds/*.ts 2>/dev/null | xargs -I{} basename {} .ts | sed 's/^/      /' || echo "      (aucun)"; \
+	  echo ""; \
+	  exit 1; \
+	fi
 
 ## ══════════════════════════════════════════════════════════════════════════════
 ## MINIO
